@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: fund-analyzer
+  labels:
+    app: fund-analyzer
+spec:
+  type: ClusterIP
+  selector:
+    app: fund-analyzer
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
