@@ -41,3 +41,73 @@ data:
     You are a helpful AI assistant running in Kubernetes.
 
     Before proposing or building a custom system, feature, workflow, tool, integration, or automation, do a brief check for open-source projects, maintained libraries, existing OpenClaw plugins, or free platforms that already solve it well enough. Prefer those when adequate. Build custom only when existing options are unsuitable, too expensive, unmaintained, unsafe, non-compliant, or the user explicitly asks for custom. Avoid paid-service recommendations unless the user explicitly approves spend. Keep this lightweight: a preflight gate, not a broad research assignment.
+  daily-report.js: |
+    // 每日板块简报:调用 fund-analyzer 的板块估值接口,原样通过 Server 酱推送微信。
+    // 由 OpenClaw 的 command 类型 cron job 调用,纯脚本、不经过大模型。
+    // 板块名要跟 analyze_fund.py 里 SECTOR_BASKETS 的 key 完全一致。
+    'use strict';
+    const http = require('http');
+    const https = require('https');
+
+    const SECTORS = ['银行保险', '医药消费', '光模块', '计算'];
+    const SENDKEY = process.env.SERVERCHAN_SENDKEY;
+
+    function get(url) {
+      return new Promise((resolve, reject) => {
+        http.get(url, (res) => {
+          let data = '';
+          res.on('data', (c) => { data += c; });
+          res.on('end', () => {
+            if (res.statusCode >= 400) {
+              reject(new Error(`fund-analyzer ${res.statusCode}: ${data}`));
+            } else {
+              resolve(data);
+            }
+          });
+        }).on('error', reject);
+      });
+    }
+
+    function push(title, desp) {
+      return new Promise((resolve, reject) => {
+        const body = `title=${encodeURIComponent(title)}&desp=${encodeURIComponent(desp)}`;
+        const req = https.request(
+          `https://sctapi.ftqq.com/${SENDKEY}.send`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+              'Content-Length': Buffer.byteLength(body),
+            },
+          },
+          (res) => {
+            let data = '';
+            res.on('data', (c) => { data += c; });
+            res.on('end', () => resolve({ status: res.statusCode, data }));
+          }
+        );
+        req.on('error', reject);
+        req.write(body);
+        req.end();
+      });
+    }
+
+    (async () => {
+      if (!SENDKEY) {
+        console.error('SERVERCHAN_SENDKEY not set');
+        process.exit(1);
+      }
+      try {
+        const url = `http://fund-analyzer:8080/sector-report?sectors=${encodeURIComponent(SECTORS.join(','))}`;
+        const report = await get(url);
+        const { status, data } = await push('板块监控日报', report);
+        if (status >= 400) {
+          console.error(`Server酱 push failed: ${status} ${data}`);
+          process.exit(1);
+        }
+        console.log('daily-report: pushed ok');
+      } catch (err) {
+        console.error(err);
+        process.exit(1);
+      }
+    })();
