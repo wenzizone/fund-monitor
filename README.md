@@ -114,6 +114,14 @@ kubectl run -it --rm debug --image=curlimages/curl -n $OPENCLAW_NAMESPACE -- \
   curl "http://fund-analyzer:8080/report?codes=017234"                # 验证分析服务
 ```
 
+### 控制台访问(HTTPRoute)
+
+`manifests/httproute.yaml` 把控制台接到了公司内部的 Gateway API(`gateway-internal` / `envoy-gateway` namespace),不用每次都 `kubectl port-forward`。这要求 `configmap.yaml` 里 `gateway.bind` 是 `lan`(监听 `0.0.0.0`)而不是官方默认的 `loopback`(只监听容器内 `127.0.0.1`,Service/HTTPRoute 这种走 Pod 真实网卡的路径连不上,会报 `Connection refused`)。
+
+`bind: lan` 意味着控制台在集群内网(以及接了这个 Gateway 的网段)都能访问,不再局限于 `kubectl port-forward` 这种需要集群权限的窄通道——**必须**确保 `gateway.auth.mode: token` 一直开着(已经是默认配置),不要在暴露 `lan` 的同时又关掉 auth。
+
+这个 HTTPRoute 目前是按 oke-qa 集群配的(`hv-test.qa.linkedbro.com`,证书走 `*.qa.linkedbro.com` 通配符),换集群要改 `parentRefs`/`hostnames`。
+
 ### 定时任务(cron)
 
 cron job 实际存放在 gateway 容器内 `~/.openclaw/cron/jobs.json`(PVC 上,不受 ConfigMap/GitOps 管理),所以每次新增/改动 cron job,部署完 manifests 之后还要额外 `kubectl exec` 进 gateway 容器手动注册一次(和 `gateway-secrets` 一样,是有意不放进 Git 的运行时状态)。
@@ -167,7 +175,7 @@ kubectl exec -n "$OPENCLAW_NAMESPACE" deploy/gateway -- openclaw cron run <jobId
 | `image: ghcr.io/openclaw/openclaw:slim` | `manifests/deployment.yaml` | OpenClaw 官方镜像,这套方案的前提是不自建镜像;这是唯一没有改名的地方,镜像本身就叫这个名字,改不掉 |
 | `image: python:3.12-slim` | `fund-analyzer/deployment.yaml` | 同上,fund-analyzer 也不自建镜像 |
 | `"cron": { "enabled": true }` | `manifests/configmap.yaml` | 我们特意从官方默认的 `false` 改成 `true`,关掉的话定时任务全部失效 |
-| `gateway.port: 18789` / `bind: loopback` | `manifests/configmap.yaml` | 微信登录、控制台访问都依赖这个端口/绑定方式,改了要连带改 Service |
+| `gateway.port: 18789` | `manifests/configmap.yaml` | 微信登录、控制台访问都依赖这个端口,改了要连带改 Service |
 | Deployment/Service/PVC/ConfigMap/Secret 都叫 `gateway*` 不叫 `openclaw*` | `manifests/*.yaml` | 为了在公司共享的 ArgoCD/devops 仓库里不出现 "claw" 字样,把这几个 K8s 资源名从官方默认的 `openclaw`/`openclaw-secrets`/`openclaw-home-pvc`/`openclaw-config` 统一改成了 `gateway`/`gateway-secrets`/`gateway-home-pvc`/`gateway-config`。容器内配置文件名 `openclaw.json` 是程序读取配置时硬编码要找的文件名,改不了,只把它外面的目录 `/home/node/.gateway` 改了名 |
 | `containerPort: 8080` 及对应 `service.yaml` 的 `port/targetPort` | `fund-analyzer/` | 改端口必须 Deployment 和 Service 一起改,且 OpenClaw 调用的 URL 也要跟着改 |
 | ConfigMap 名称的哈希后缀(如 `fund-analyzer-scripts-mcdk9h585b`) | Kustomize 自动生成 | 不要手动指定或硬编码这个名字,Deployment 的引用由 Kustomize 自动同步 |
