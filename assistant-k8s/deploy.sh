@@ -11,12 +11,12 @@
 #   ./scripts/k8s/deploy.sh --delete          # Tear down
 #
 # Environment:
-#   OPENCLAW_NAMESPACE   Kubernetes namespace (default: openclaw)
+#   OPENCLAW_NAMESPACE   Kubernetes namespace (default: gateway)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MANIFESTS="$SCRIPT_DIR/manifests"
-NS="${OPENCLAW_NAMESPACE:-openclaw}"
+NS="${OPENCLAW_NAMESPACE:-gateway}"
 
 # Check prerequisites
 for cmd in kubectl openssl; do
@@ -41,7 +41,7 @@ Environment:
   Export at least one provider API key:
     ANTHROPIC_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY
 
-  OPENCLAW_NAMESPACE     Kubernetes namespace (default: openclaw)
+  OPENCLAW_NAMESPACE     Kubernetes namespace (default: gateway)
 HELP
   exit 0
 fi
@@ -96,13 +96,13 @@ _apply_secret() {
   chmod 700 "$TMP_DIR"
   trap 'rm -rf "$TMP_DIR"' EXIT
 
-  if kubectl get secret openclaw-secrets -n "$NS" &>/dev/null; then
+  if kubectl get secret gateway-secrets -n "$NS" &>/dev/null; then
     EXISTING_SECRET=true
-    EXISTING_TOKEN="$(kubectl get secret openclaw-secrets -n "$NS" -o jsonpath='{.data.OPENCLAW_GATEWAY_TOKEN}' | base64 -d)"
-    ANTHROPIC_VALUE="$(kubectl get secret openclaw-secrets -n "$NS" -o jsonpath='{.data.ANTHROPIC_API_KEY}' 2>/dev/null | base64 -d)"
-    OPENAI_VALUE="$(kubectl get secret openclaw-secrets -n "$NS" -o jsonpath='{.data.OPENAI_API_KEY}' 2>/dev/null | base64 -d)"
-    GEMINI_VALUE="$(kubectl get secret openclaw-secrets -n "$NS" -o jsonpath='{.data.GEMINI_API_KEY}' 2>/dev/null | base64 -d)"
-    OPENROUTER_VALUE="$(kubectl get secret openclaw-secrets -n "$NS" -o jsonpath='{.data.OPENROUTER_API_KEY}' 2>/dev/null | base64 -d)"
+    EXISTING_TOKEN="$(kubectl get secret gateway-secrets -n "$NS" -o jsonpath='{.data.OPENCLAW_GATEWAY_TOKEN}' | base64 -d)"
+    ANTHROPIC_VALUE="$(kubectl get secret gateway-secrets -n "$NS" -o jsonpath='{.data.ANTHROPIC_API_KEY}' 2>/dev/null | base64 -d)"
+    OPENAI_VALUE="$(kubectl get secret gateway-secrets -n "$NS" -o jsonpath='{.data.OPENAI_API_KEY}' 2>/dev/null | base64 -d)"
+    GEMINI_VALUE="$(kubectl get secret gateway-secrets -n "$NS" -o jsonpath='{.data.GEMINI_API_KEY}' 2>/dev/null | base64 -d)"
+    OPENROUTER_VALUE="$(kubectl get secret gateway-secrets -n "$NS" -o jsonpath='{.data.OPENROUTER_API_KEY}' 2>/dev/null | base64 -d)"
   fi
 
   TOKEN="${EXISTING_TOKEN:-$(openssl rand -hex 32)}"
@@ -125,7 +125,7 @@ _apply_secret() {
     "$TMP_DIR/GEMINI_API_KEY" \
     "$TMP_DIR/OPENROUTER_API_KEY"
 
-  kubectl create secret generic openclaw-secrets \
+  kubectl create secret generic gateway-secrets \
     -n "$NS" \
     --from-file=OPENCLAW_GATEWAY_TOKEN="$TMP_DIR/OPENCLAW_GATEWAY_TOKEN" \
     --from-file=ANTHROPIC_API_KEY="$TMP_DIR/ANTHROPIC_API_KEY" \
@@ -137,9 +137,9 @@ _apply_secret() {
   chmod 600 "$SECRET_MANIFEST"
 
   kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-  kubectl apply --server-side --field-manager=openclaw -f "$SECRET_MANIFEST" >/dev/null
+  kubectl apply --server-side --field-manager=gateway -f "$SECRET_MANIFEST" >/dev/null
   # Clean up any annotation left by older client-side apply runs.
-  kubectl annotate secret openclaw-secrets -n "$NS" kubectl.kubernetes.io/last-applied-configuration- >/dev/null 2>&1 || true
+  kubectl annotate secret gateway-secrets -n "$NS" kubectl.kubernetes.io/last-applied-configuration- >/dev/null 2>&1 || true
   rm -rf "$TMP_DIR"
   trap - EXIT
 
@@ -154,7 +154,7 @@ _apply_secret() {
   else
     echo "Gateway token stored in Secret only."
     echo "Retrieve it with:"
-    echo "  kubectl get secret openclaw-secrets -n $NS -o jsonpath='{.data.OPENCLAW_GATEWAY_TOKEN}' | base64 -d && echo"
+    echo "  kubectl get secret gateway-secrets -n $NS -o jsonpath='{.data.OPENCLAW_GATEWAY_TOKEN}' | base64 -d && echo"
   fi
 }
 
@@ -187,7 +187,7 @@ fi
 # ---------------------------------------------------------------------------
 # Check that the secret exists in the cluster
 # ---------------------------------------------------------------------------
-if ! kubectl get secret openclaw-secrets -n "$NS" &>/dev/null; then
+if ! kubectl get secret gateway-secrets -n "$NS" &>/dev/null; then
   HAS_KEY=false
   for key in ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY OPENROUTER_API_KEY; do
     [[ -n "${!key:-}" ]] && HAS_KEY=true
@@ -213,19 +213,19 @@ fi
 echo "Deploying to namespace '$NS'..."
 kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 kubectl apply -k "$MANIFESTS" -n "$NS"
-kubectl rollout restart deployment/openclaw -n "$NS" 2>/dev/null || true
+kubectl rollout restart deployment/gateway -n "$NS" 2>/dev/null || true
 echo ""
 echo "Waiting for rollout..."
-kubectl rollout status deployment/openclaw -n "$NS" --timeout=300s
+kubectl rollout status deployment/gateway -n "$NS" --timeout=300s
 echo ""
 echo "Done. Access the gateway:"
-echo "  kubectl port-forward svc/openclaw 18789:18789 -n $NS"
+echo "  kubectl port-forward svc/gateway 18789:18789 -n $NS"
 echo "  open http://localhost:18789"
 echo ""
 if $SHOW_TOKEN; then
   echo "Gateway token (paste into Control UI):"
-  echo "  $(kubectl get secret openclaw-secrets -n "$NS" -o jsonpath='{.data.OPENCLAW_GATEWAY_TOKEN}' | base64 -d)"
+  echo "  $(kubectl get secret gateway-secrets -n "$NS" -o jsonpath='{.data.OPENCLAW_GATEWAY_TOKEN}' | base64 -d)"
 echo ""
 fi
 echo "Retrieve the gateway token with:"
-echo "  kubectl get secret openclaw-secrets -n $NS -o jsonpath='{.data.OPENCLAW_GATEWAY_TOKEN}' | base64 -d && echo"
+echo "  kubectl get secret gateway-secrets -n $NS -o jsonpath='{.data.OPENCLAW_GATEWAY_TOKEN}' | base64 -d && echo"

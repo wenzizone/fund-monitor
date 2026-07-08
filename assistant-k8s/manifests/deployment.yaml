@@ -1,20 +1,20 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: openclaw
+  name: gateway
   labels:
-    app: openclaw
+    app: gateway
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: openclaw
+      app: gateway
   strategy:
     type: Recreate
   template:
     metadata:
       labels:
-        app: openclaw
+        app: gateway
     spec:
       automountServiceAccountToken: false
       securityContext:
@@ -29,9 +29,9 @@ spec:
             - sh
             - -c
             - |
-              cp /config/openclaw.json /home/node/.openclaw/openclaw.json
-              mkdir -p /home/node/.openclaw/workspace
-              cp /config/AGENTS.md /home/node/.openclaw/workspace/AGENTS.md
+              cp /config/config.json /home/node/.gateway/openclaw.json
+              mkdir -p /home/node/.gateway/workspace
+              cp /config/AGENTS.md /home/node/.gateway/workspace/AGENTS.md
           securityContext:
             runAsUser: 1000
             runAsGroup: 1000
@@ -43,10 +43,12 @@ spec:
               memory: 64Mi
               cpu: 100m
           volumeMounts:
-            - name: openclaw-home
-              mountPath: /home/node/.openclaw
+            - name: gateway-home
+              mountPath: /home/node/.gateway
             - name: config
               mountPath: /config
+          # 目标目录名(gateway)和实际配置文件名(openclaw.json)不同——
+          # openclaw.json 是 OpenClaw 程序本身要求的固定文件名,不是我们能改的
       containers:
         - name: gateway
           image: ghcr.io/openclaw/openclaw:slim
@@ -64,36 +66,36 @@ spec:
             - name: HOME
               value: /home/node
             - name: OPENCLAW_CONFIG_DIR
-              value: /home/node/.openclaw
+              value: /home/node/.gateway
             - name: NODE_ENV
               value: production
             - name: OPENCLAW_GATEWAY_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: openclaw-secrets
+                  name: gateway-secrets
                   key: OPENCLAW_GATEWAY_TOKEN
             - name: ANTHROPIC_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: openclaw-secrets
+                  name: gateway-secrets
                   key: ANTHROPIC_API_KEY
                   optional: true
             - name: OPENAI_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: openclaw-secrets
+                  name: gateway-secrets
                   key: OPENAI_API_KEY
                   optional: true
             - name: GEMINI_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: openclaw-secrets
+                  name: gateway-secrets
                   key: GEMINI_API_KEY
                   optional: true
             - name: OPENROUTER_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: openclaw-secrets
+                  name: gateway-secrets
                   key: OPENROUTER_API_KEY
                   optional: true
           resources:
@@ -122,8 +124,8 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 5
           volumeMounts:
-            - name: openclaw-home
-              mountPath: /home/node/.openclaw
+            - name: gateway-home
+              mountPath: /home/node/.gateway
             - name: tmp-volume
               mountPath: /tmp
           securityContext:
@@ -136,11 +138,11 @@ spec:
               drop:
                 - ALL
       volumes:
-        - name: openclaw-home
+        - name: gateway-home
           persistentVolumeClaim:
-            claimName: openclaw-home-pvc
+            claimName: gateway-home-pvc
         - name: config
           configMap:
-            name: openclaw-config
+            name: gateway-config
         - name: tmp-volume
           emptyDir: {}

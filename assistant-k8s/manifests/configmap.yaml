@@ -1,11 +1,14 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: openclaw-config
+  name: gateway-config
   labels:
-    app: openclaw
+    app: gateway
 data:
-  openclaw.json: |
+  # 这个 key 名字任意(只是 ConfigMap 里的一个数据条目),真正决定 OpenClaw
+  # 能不能识别配置文件的是 deployment.yaml 里 initContainer 拷贝到容器内的
+  # 目标文件名 openclaw.json——这个不能改,是程序本身要求的固定文件名。
+  config.json: |
     {
       "gateway": {
         "mode": "local",
@@ -20,13 +23,13 @@ data:
       },
       "agents": {
         "defaults": {
-          "workspace": "~/.openclaw/workspace"
+          "workspace": "~/.gateway/workspace"
         },
         "list": [
           {
             "id": "default",
             "name": "OpenClaw Assistant",
-            "workspace": "~/.openclaw/workspace"
+            "workspace": "~/.gateway/workspace"
           }
         ]
       },
