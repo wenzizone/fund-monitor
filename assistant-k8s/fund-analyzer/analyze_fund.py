@@ -20,6 +20,17 @@ LG_INDEX_NAMES = {
 
 VALUATION_LOOKBACK_YEARS = 10
 
+# 板块代表股篮子: 官方行业分类接口(巨潮资讯)只能按天查询、无法一次性拿多年历史,
+# 也覆盖不了"光模块"这类产品概念而非正式行业分类的板块。改用百度股市通的个股
+# 估值接口(单只股票一次调用即可拿到多年历史,和 get_index_pe_percentile 同一套
+# 百分位算法),用几只代表股加权近似板块整体估值。
+SECTOR_BASKETS: dict[str, list[tuple[str, str]]] = {
+    "银行保险": [("600036", "招商银行"), ("601318", "中国平安"), ("601398", "工商银行")],
+    "医药消费": [("600276", "恒瑞医药"), ("300760", "迈瑞医疗"), ("603259", "药明康德")],
+    "光模块": [("300308", "中际旭创"), ("300502", "新易盛"), ("300394", "天孚通信")],
+    "计算": [("600588", "用友网络"), ("600570", "恒生电子"), ("300454", "深信服")],
+}
+
 
 def _safe(fn, *args, **kwargs):
     try:
@@ -158,6 +169,96 @@ def get_market_position_sentiment() -> dict | None:
         "percentile": round(float(percentile), 1),
         "history_points": len(df),
     }
+
+
+def get_stock_pe_percentile(code: str, lookback_years: int = VALUATION_LOOKBACK_YEARS) -> dict:
+    df = ak.stock_zh_valuation_baidu(symbol=code, indicator="市盈率(TTM)", period="全部")
+    df = df.dropna(subset=["value"])
+    df["date"] = pd.to_datetime(df["date"])
+    cutoff = df["date"].max() - pd.DateOffset(years=lookback_years)
+    window = df[df["date"] >= cutoff]
+    latest = window.iloc[-1]
+    pe = float(latest["value"])
+    date_str = latest["date"].strftime("%Y-%m-%d")
+    if pe <= 0:
+        return {"date": date_str, "pe_ttm": round(pe, 2), "percentile": None, "note": "当前亏损(TTM PE为负),百分位不适用"}
+    positive = window[window["value"] > 0]
+    percentile = (positive["value"] < pe).mean() * 100
+    return {"date": date_str, "pe_ttm": round(pe, 2), "percentile": round(float(percentile), 1)}
+
+
+def build_sector_advice(avg_percentile: float | None, market_position: dict | None = None) -> str:
+    if avg_percentile is None:
+        base = "代表股数据不足(或均处于亏损区间),无法给出板块估值判断"
+    elif avg_percentile < 20:
+        base = "板块代表股估值处于历史低位(<20%分位),具备左侧布局性价比"
+    elif avg_percentile < 50:
+        base = "板块代表股估值中性偏低(20-50%分位),维持正常定投观察节奏"
+    elif avg_percentile < 80:
+        base = "板块代表股估值偏高(50-80%分位),不建议加大额度追高"
+    else:
+        base = "板块代表股估值处于历史高位(>80%分位),追高风险较大,不建议新增建仓"
+
+    if market_position and market_position.get("percentile") is not None:
+        p = market_position["percentile"]
+        if p > 85:
+            base += f"；全市场股票型基金平均仓位处于{p}%分位(接近历史高位),机构整体已偏满仓"
+        elif p < 15:
+            base += f"；全市场股票型基金平均仓位处于{p}%分位(历史低位),机构整体偏谨慎"
+    return base
+
+
+def get_sector_report(sector_name: str) -> dict:
+    basket = SECTOR_BASKETS.get(sector_name)
+    if not basket:
+        return {"error": f"未知板块: {sector_name}，可选: {', '.join(SECTOR_BASKETS)}"}
+
+    details = []
+    for code, name in basket:
+        d, err = _safe(get_stock_pe_percentile, code)
+        if d is None:
+            details.append({"code": code, "name": name, "error": err})
+        else:
+            details.append({"code": code, "name": name, **d})
+
+    valid = [d["percentile"] for d in details if d.get("percentile") is not None]
+    avg_percentile = round(sum(valid) / len(valid), 1) if valid else None
+    market_position = get_market_position_sentiment()
+    advice = build_sector_advice(avg_percentile, market_position)
+
+    return {
+        "sector": sector_name,
+        "stocks": details,
+        "avg_percentile": avg_percentile,
+        "market_position": market_position,
+        "advice": advice,
+    }
+
+
+def format_sector_report(result: dict) -> str:
+    if "error" in result:
+        return f"=== 板块查询失败 ===\n{result['error']}"
+
+    lines = [f"=== {result['sector']} 板块估值(代表股篮子) ==="]
+    for d in result["stocks"]:
+        if "error" in d:
+            lines.append(f"  - {d['name']}({d['code']}): 获取失败({d['error']})")
+        elif d.get("percentile") is None:
+            lines.append(f"  - {d['name']}({d['code']}): PE(TTM)={d['pe_ttm']}, {d.get('note', '百分位不适用')} (截至{d['date']})")
+        else:
+            lines.append(f"  - {d['name']}({d['code']}): PE(TTM)={d['pe_ttm']}, 历史百分位={d['percentile']}% (截至{d['date']})")
+
+    if result["avg_percentile"] is not None:
+        lines.append(f"板块加权估值百分位: {result['avg_percentile']}%")
+
+    mp = result.get("market_position") or {}
+    if mp and "error" not in mp:
+        lines.append(f"全市场股票型基金平均仓位: {mp['position_pct']}% (截至{mp['date']}, 历史分位={mp['percentile']}%)")
+    elif mp.get("error"):
+        lines.append(f"全市场基金仓位数据: 获取失败({mp['error']})")
+
+    lines.append(f"综合建议: {result['advice']}")
+    return "\n".join(lines)
 
 
 def build_advice(
@@ -306,7 +407,11 @@ def print_report(result: dict) -> None:
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("用法: python3 analyze_fund.py <基金代码> [基金代码 ...]")
+        print(f"用法: python3 analyze_fund.py <基金代码|板块名> [...]\n可选板块: {', '.join(SECTOR_BASKETS)}")
         sys.exit(1)
-    for code in sys.argv[1:]:
-        print_report(analyze(code))
+    for arg in sys.argv[1:]:
+        if arg in SECTOR_BASKETS:
+            print(format_sector_report(get_sector_report(arg)))
+        else:
+            print_report(analyze(arg))
+        print()
