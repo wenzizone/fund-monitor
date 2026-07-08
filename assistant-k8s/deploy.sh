@@ -41,6 +41,9 @@ Environment:
   Export at least one provider API key:
     ANTHROPIC_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY
 
+  Optional:
+    SERVERCHAN_SENDKEY   Server酱 SendKey, for cron jobs that push to WeChat
+
   OPENCLAW_NAMESPACE     Kubernetes namespace (default: gateway)
 HELP
   exit 0
@@ -90,6 +93,7 @@ _apply_secret() {
   local OPENAI_VALUE=""
   local GEMINI_VALUE=""
   local OPENROUTER_VALUE=""
+  local SERVERCHAN_VALUE=""
   local TOKEN
   local SECRET_MANIFEST
   TMP_DIR="$(mktemp -d)"
@@ -103,6 +107,7 @@ _apply_secret() {
     OPENAI_VALUE="$(kubectl get secret gateway-secrets -n "$NS" -o jsonpath='{.data.OPENAI_API_KEY}' 2>/dev/null | base64 -d)"
     GEMINI_VALUE="$(kubectl get secret gateway-secrets -n "$NS" -o jsonpath='{.data.GEMINI_API_KEY}' 2>/dev/null | base64 -d)"
     OPENROUTER_VALUE="$(kubectl get secret gateway-secrets -n "$NS" -o jsonpath='{.data.OPENROUTER_API_KEY}' 2>/dev/null | base64 -d)"
+    SERVERCHAN_VALUE="$(kubectl get secret gateway-secrets -n "$NS" -o jsonpath='{.data.SERVERCHAN_SENDKEY}' 2>/dev/null | base64 -d)"
   fi
 
   TOKEN="${EXISTING_TOKEN:-$(openssl rand -hex 32)}"
@@ -110,6 +115,7 @@ _apply_secret() {
   OPENAI_VALUE="${OPENAI_API_KEY:-$OPENAI_VALUE}"
   GEMINI_VALUE="${GEMINI_API_KEY:-$GEMINI_VALUE}"
   OPENROUTER_VALUE="${OPENROUTER_API_KEY:-$OPENROUTER_VALUE}"
+  SERVERCHAN_VALUE="${SERVERCHAN_SENDKEY:-$SERVERCHAN_VALUE}"
   SECRET_MANIFEST="$TMP_DIR/secrets.yaml"
 
   # Write secret material to temp files so kubectl handles encoding safely.
@@ -118,12 +124,14 @@ _apply_secret() {
   printf '%s' "$OPENAI_VALUE" > "$TMP_DIR/OPENAI_API_KEY"
   printf '%s' "$GEMINI_VALUE" > "$TMP_DIR/GEMINI_API_KEY"
   printf '%s' "$OPENROUTER_VALUE" > "$TMP_DIR/OPENROUTER_API_KEY"
+  printf '%s' "$SERVERCHAN_VALUE" > "$TMP_DIR/SERVERCHAN_SENDKEY"
   chmod 600 \
     "$TMP_DIR/OPENCLAW_GATEWAY_TOKEN" \
     "$TMP_DIR/ANTHROPIC_API_KEY" \
     "$TMP_DIR/OPENAI_API_KEY" \
     "$TMP_DIR/GEMINI_API_KEY" \
-    "$TMP_DIR/OPENROUTER_API_KEY"
+    "$TMP_DIR/OPENROUTER_API_KEY" \
+    "$TMP_DIR/SERVERCHAN_SENDKEY"
 
   kubectl create secret generic gateway-secrets \
     -n "$NS" \
@@ -132,6 +140,7 @@ _apply_secret() {
     --from-file=OPENAI_API_KEY="$TMP_DIR/OPENAI_API_KEY" \
     --from-file=GEMINI_API_KEY="$TMP_DIR/GEMINI_API_KEY" \
     --from-file=OPENROUTER_API_KEY="$TMP_DIR/OPENROUTER_API_KEY" \
+    --from-file=SERVERCHAN_SENDKEY="$TMP_DIR/SERVERCHAN_SENDKEY" \
     --dry-run=client \
     -o yaml > "$SECRET_MANIFEST"
   chmod 600 "$SECRET_MANIFEST"

@@ -100,6 +100,12 @@ spec:
                   name: gateway-secrets
                   key: OPENROUTER_API_KEY
                   optional: true
+            - name: SERVERCHAN_SENDKEY
+              valueFrom:
+                secretKeyRef:
+                  name: gateway-secrets
+                  key: SERVERCHAN_SENDKEY
+                  optional: true
           resources:
             requests:
               memory: 512Mi
