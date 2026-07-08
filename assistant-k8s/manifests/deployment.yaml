@@ -29,9 +29,9 @@ spec:
             - sh
             - -c
             - |
-              cp /config/config.json /home/node/.gateway/openclaw.json
-              mkdir -p /home/node/.gateway/workspace
-              cp /config/AGENTS.md /home/node/.gateway/workspace/AGENTS.md
+              cp /config/config.json /home/node/.openclaw/openclaw.json
+              mkdir -p /home/node/.openclaw/workspace
+              cp /config/AGENTS.md /home/node/.openclaw/workspace/AGENTS.md
           securityContext:
             runAsUser: 1000
             runAsGroup: 1000
@@ -44,11 +44,13 @@ spec:
               cpu: 100m
           volumeMounts:
             - name: gateway-home
-              mountPath: /home/node/.gateway
+              mountPath: /home/node/.openclaw
             - name: config
               mountPath: /config
-          # 目标目录名(gateway)和实际配置文件名(openclaw.json)不同——
-          # openclaw.json 是 OpenClaw 程序本身要求的固定文件名,不是我们能改的
+          # 容器内的 /home/node/.openclaw 这个路径不能改名——OpenClaw 运行时的
+          # 插件状态数据库等内部子系统是硬编码这个路径的,不受 OPENCLAW_CONFIG_DIR
+          # 影响,改了会导致 "mkdir .../state: ENOENT" 崩溃(实测踩过这个坑)。
+          # K8s 层面的资源名字(卷名 gateway-home、PVC 名等)不受影响,可以放心保留 gateway 命名。
       containers:
         - name: gateway
           image: ghcr.io/openclaw/openclaw:slim
@@ -66,7 +68,7 @@ spec:
             - name: HOME
               value: /home/node
             - name: OPENCLAW_CONFIG_DIR
-              value: /home/node/.gateway
+              value: /home/node/.openclaw
             - name: NODE_ENV
               value: production
             - name: OPENCLAW_GATEWAY_TOKEN
@@ -125,7 +127,7 @@ spec:
             timeoutSeconds: 5
           volumeMounts:
             - name: gateway-home
-              mountPath: /home/node/.gateway
+              mountPath: /home/node/.openclaw
             - name: tmp-volume
               mountPath: /tmp
           securityContext:

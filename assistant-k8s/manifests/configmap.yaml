@@ -23,13 +23,13 @@ data:
       },
       "agents": {
         "defaults": {
-          "workspace": "~/.gateway/workspace"
+          "workspace": "~/.openclaw/workspace"
         },
         "list": [
           {
             "id": "default",
             "name": "OpenClaw Assistant",
-            "workspace": "~/.gateway/workspace"
+            "workspace": "~/.openclaw/workspace"
           }
         ]
       },
