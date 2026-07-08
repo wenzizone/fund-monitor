@@ -6,5 +6,5 @@ resources:
 configMapGenerator:
   - name: fund-analyzer-scripts
     files:
-      - ../../analyze_fund.py
-      - ../../server.py
+      - analyze_fund.py
+      - server.py

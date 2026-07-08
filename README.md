@@ -114,15 +114,11 @@ kubectl run -it --rm debug --image=curlimages/curl -n $OPENCLAW_NAMESPACE -- \
   curl "http://fund-analyzer:8080/report?codes=017234"                # 验证分析服务
 ```
 
-### (可选)接入 ArgoCD
+### 接入 ArgoCD
 
-`assistant-k8s/manifests/` 和 `assistant-k8s/fund-analyzer/` 都是独立的 Kustomize root,可以各建一个 ArgoCD Application 指过去。唯一前提:在 `argocd-cm` 里加一条
+`assistant-k8s/manifests/` 和 `assistant-k8s/fund-analyzer/` 都是独立、自包含的 Kustomize root,可以直接建 ArgoCD Application(或用同一个 Application 的多 `sources` 字段)指过去,不需要对 ArgoCD 做任何全局配置改动。
 
-```yaml
-kustomize.buildOptions: "--load-restrictor LoadRestrictionsNone"
-```
-
-因为 `fund-analyzer` 的 `configMapGenerator` 引用了 kustomization 根目录之外的 `analyze_fund.py`/`server.py`,默认会被 Kustomize 的安全限制拦下。
+`fund-analyzer` 的 `analyze_fund.py`/`server.py` 两个脚本的"正本"实际就放在 `assistant-k8s/fund-analyzer/` 目录内部,仓库根目录那两个是指向它们的**软链接**(方便本地继续用 `python3 analyze_fund.py` 这种习惯用法)。这么做是为了让 `configMapGenerator` 只引用自己目录内的文件——一开始的版本是从仓库根目录跨目录引用的,结果部署到公司共享的 ArgoCD 时才发现:那样需要在 `argocd-cm` 里加 `kustomize.buildOptions: "--load-restrictor LoadRestrictionsNone"` 这种全局配置,而这是 Helm 管理的共享生产配置,手动改了下次 `helm upgrade` 大概率会被覆盖回去,属于治标不治本,所以改成了现在这个自包含的目录结构,彻底不依赖任何外部配置。
 
 **OpenClaw 的密钥(`gateway-secrets`)不要交给 ArgoCD 管**,继续保持现在这样手动 `--create-secret` 一次性创建——密钥不应该以任何形式进 Git。
 
