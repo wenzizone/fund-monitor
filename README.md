@@ -135,8 +135,12 @@ kubectl exec -n "$OPENCLAW_NAMESPACE" deploy/gateway -- \
   openclaw cron create "30 7 * * 1-5" \
   --command "node ~/.openclaw/workspace/daily-report.js" \
   --name "基金每日简报" \
-  --timeout-seconds 60
+  --timeout-seconds 60 \
+  --tz Asia/Shanghai \
+  --no-deliver
 ```
+
+`--tz` 必须显式写,不写会用 gateway 容器的本地时区(UTC)解释 cron 表达式,实际会晚 8 小时跑(变成北京时间 15:30 而不是 7:30)。`--no-deliver` 是因为这个 job 是纯脚本、没配 chat channel,不加这个的话每次跑完 cron 都会因为"找不到频道去 announce 结果"而被标成 error 状态(脚本本身其实是成功的,看 `cron get <id>` 里的 `lastDiagnosticSummary` 才是真实结果)。
 
 验证:
 
