@@ -8,7 +8,7 @@ data:
   # 这个 key 名字任意(只是 ConfigMap 里的一个数据条目),真正决定 OpenClaw
   # 能不能识别配置文件的是 deployment.yaml 里 initContainer 拷贝到容器内的
   # 目标文件名 openclaw.json——这个不能改,是程序本身要求的固定文件名。
-  # 显式指定默认模型为 google/gemini-3.1-pro-preview:集群目前只配了 GEMINI_API_KEY,
+  # 显式指定默认模型为 google/gemini-3.1-flash-lite-preview:集群目前只配了 GEMINI_API_KEY,
   # 不写这个的话 OpenClaw 内置默认模型是 openai/gpt-5.5,而 OPENAI_API_KEY 没配,
   # 会导致所有 agent 类型任务(比如以后的周报)因为缺认证直接失败。
   config.json: |
@@ -29,10 +29,10 @@ data:
         "defaults": {
           "workspace": "~/.openclaw/workspace",
           "model": {
-            "primary": "google/gemini-3.1-pro-preview"
+            "primary": "google/gemini-3.1-flash-lite-preview"
           },
           "models": {
-            "google/gemini-3.1-pro-preview": {}
+            "google/gemini-3.1-flash-lite-preview": {}
           }
         },
         "list": [
