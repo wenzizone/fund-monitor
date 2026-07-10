@@ -22,7 +22,8 @@ data:
           "mode": "token"
         },
         "controlUi": {
-          "enabled": true
+          "enabled": true,
+          "allowedOrigins": ["http://hv-test.qa.linkedbro.com"]
         }
       },
       "agents": {
