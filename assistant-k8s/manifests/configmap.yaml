@@ -121,3 +121,63 @@ data:
         process.exit(1);
       }
     })();
+  weekly-push.js: |
+    // 通用 Server 酱推送脚本:把一个文本文件的内容原样推微信。
+    // 由每周综合解读 agent 类型 cron job 在 exec 工具里调用——大模型先把
+    // 分析结果写到工作区的一个文件里,再跑这个脚本推送,不依赖 OpenClaw
+    // 自己的聊天通道(Weixin 通道还没配置扫码登录)。
+    // 用法: node weekly-push.js <report-file> [title]
+    'use strict';
+    const fs = require('fs');
+    const https = require('https');
+
+    const SENDKEY = process.env.SERVERCHAN_SENDKEY;
+    const file = process.argv[2];
+    const title = process.argv[3] || '基金每周综合解读';
+
+    function push(title, desp) {
+      return new Promise((resolve, reject) => {
+        const body = `title=${encodeURIComponent(title)}&desp=${encodeURIComponent(desp)}`;
+        const req = https.request(
+          `https://sctapi.ftqq.com/${SENDKEY}.send`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+              'Content-Length': Buffer.byteLength(body),
+            },
+          },
+          (res) => {
+            let data = '';
+            res.on('data', (c) => { data += c; });
+            res.on('end', () => resolve({ status: res.statusCode, data }));
+          }
+        );
+        req.on('error', reject);
+        req.write(body);
+        req.end();
+      });
+    }
+
+    (async () => {
+      if (!SENDKEY) {
+        console.error('SERVERCHAN_SENDKEY not set');
+        process.exit(1);
+      }
+      if (!file) {
+        console.error('usage: node weekly-push.js <report-file> [title]');
+        process.exit(1);
+      }
+      try {
+        const desp = fs.readFileSync(file, 'utf8');
+        const { status, data } = await push(title, desp);
+        if (status >= 400) {
+          console.error(`Server酱 push failed: ${status} ${data}`);
+          process.exit(1);
+        }
+        console.log('weekly-push: pushed ok');
+      } catch (err) {
+        console.error(err);
+        process.exit(1);
+      }
+    })();
