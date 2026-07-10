@@ -34,6 +34,7 @@ spec:
               mkdir -p /home/node/.openclaw/workspace
               cp /config/AGENTS.md /home/node/.openclaw/workspace/AGENTS.md
               cp /config/daily-report.js /home/node/.openclaw/workspace/daily-report.js
+              cp /config/weekly-push.js /home/node/.openclaw/workspace/weekly-push.js
           # 这个 initContainer 故意不设 runAsUser(用镜像默认的 root),因为 PVC 卷首次挂载时
           # 目录属主是 root(fsGroup 只改组,不改属主),需要 root 权限执行一次 chown 才能修正,
           # 后面 openclaw 自己在这个目录下创建的文件/子目录都是它自己(node 用户)写的,不受影响。

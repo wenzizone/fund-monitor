@@ -11,8 +11,18 @@ data:
   # 显式指定默认模型为 google/gemini-3.1-flash-lite-preview:集群目前只配了 GEMINI_API_KEY,
   # 不写这个的话 OpenClaw 内置默认模型是 openai/gpt-5.5,而 OPENAI_API_KEY 没配,
   # 会导致所有 agent 类型任务(比如以后的周报)因为缺认证直接失败。
+  # web_search 工具显式指定 duckduckgo:默认按 GEMINI_API_KEY 自动选中的 gemini 搜索
+  # provider 内部硬编码调用了 Google 已经下线给新用户的 models/gemini-2.5-flash,
+  # 实测直接 404,和我们自己配置的对话模型无关;duckduckgo 不需要 key,已验证可用。
   config.json: |
     {
+      "tools": {
+        "web": {
+          "search": {
+            "provider": "duckduckgo"
+          }
+        }
+      },
       "gateway": {
         "mode": "local",
         "bind": "custom",
@@ -117,6 +127,66 @@ data:
           process.exit(1);
         }
         console.log('daily-report: pushed ok');
+      } catch (err) {
+        console.error(err);
+        process.exit(1);
+      }
+    })();
+  weekly-push.js: |
+    // 通用 Server 酱推送脚本:把一个文本文件的内容原样推微信。
+    // 由每周综合解读 agent 类型 cron job 在 exec 工具里调用——大模型先把
+    // 分析结果写到工作区的一个文件里,再跑这个脚本推送,不依赖 OpenClaw
+    // 自己的聊天通道(Weixin 通道还没配置扫码登录)。
+    // 用法: node weekly-push.js <report-file> [title]
+    'use strict';
+    const fs = require('fs');
+    const https = require('https');
+
+    const SENDKEY = process.env.SERVERCHAN_SENDKEY;
+    const file = process.argv[2];
+    const title = process.argv[3] || '基金每周综合解读';
+
+    function push(title, desp) {
+      return new Promise((resolve, reject) => {
+        const body = `title=${encodeURIComponent(title)}&desp=${encodeURIComponent(desp)}`;
+        const req = https.request(
+          `https://sctapi.ftqq.com/${SENDKEY}.send`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+              'Content-Length': Buffer.byteLength(body),
+            },
+          },
+          (res) => {
+            let data = '';
+            res.on('data', (c) => { data += c; });
+            res.on('end', () => resolve({ status: res.statusCode, data }));
+          }
+        );
+        req.on('error', reject);
+        req.write(body);
+        req.end();
+      });
+    }
+
+    (async () => {
+      if (!SENDKEY) {
+        console.error('SERVERCHAN_SENDKEY not set');
+        process.exit(1);
+      }
+      if (!file) {
+        console.error('usage: node weekly-push.js <report-file> [title]');
+        process.exit(1);
+      }
+      try {
+        const desp = fs.readFileSync(file, 'utf8');
+        const { status, data } = await push(title, desp);
+        if (status >= 400) {
+          console.error(`Server酱 push failed: ${status} ${data}`);
+          process.exit(1);
+        }
+        console.log('weekly-push: pushed ok');
       } catch (err) {
         console.error(err);
         process.exit(1);
