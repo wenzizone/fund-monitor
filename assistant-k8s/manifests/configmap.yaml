@@ -33,7 +33,7 @@ data:
         },
         "controlUi": {
           "enabled": true,
-          "allowedOrigins": ["http://hv-test.qa.linkedbro.com"]
+          "allowedOrigins": ["https://hv-test.qa.linkedbro.com"]
         }
       },
       "agents": {
