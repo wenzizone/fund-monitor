@@ -34,22 +34,21 @@
 - [x] `assistant-k8s/manifests/` OpenClaw 官方 K8s manifests,已改 `cron.enabled: true`
 - [ ] 实际部署到目标集群
 - [ ] OpenClaw 微信 channel 配置(扫码登录)
-- [x] OpenClaw cron job 配置——**每日**部分已实现(`assistant-k8s/manifests/configmap.yaml` 里的 `daily-report.js`,部署后见下方"定时任务"一节手动注册);**每周**部分(含下方"每周任务限流设计")仍待实现
+- [x] OpenClaw cron job 配置——**每日**部分已实现(`assistant-k8s/manifests/configmap.yaml` 里的 `daily-report.js`,部署后见下方"定时任务"一节手动注册);**每周**部分也已实现(agent message 类型 cron job,见下方"定时任务"一节)
 - [ ] (可选)接入 ArgoCD
 
-### 每周任务的限流设计(待细化)
+### 每周任务的实际实现
 
-每周任务要跑 `web_search` + 大模型综合多个板块,存在撞上模型 API 限流(RPM/TPM,均按分钟滚动窗口计算)的风险,尤其 TPM——如果对每个板块都用 `web_fetch` 抓新闻全文,几个板块叠加容易在同一分钟内堆到几万甚至十几万 token。
+最终没有按最初设想拆成多个错峰小 cron job + `session:custom-id` 拼接,而是单个 agent message 类型 cron job 一次跑完——4 个板块、每板块限 1-2 次 `web_search`(只读摘要不 `web_fetch` 全文)这个量级,实测一次 agent turn 全流程(拉数据+搜索+分析+推送)耗时 75 秒、总 token 数不到 10 万,没有撞 RPM/TPM 限流,错峰拆分属于过度设计,真遇到限流报错了再考虑。
 
-初步方案(还没实现,后续再调整):
+落地过程中踩了两个和"限流"无关、但会导致任务直接失败的坑:
 
-- **不要指望 prompt 里让模型"自己悠着点"**——模型控制不了自己的调用节奏,单次大请求该占多少 TPM 还是占多少,拆分对这个没用
-- **靠 OpenClaw 调度器本身把请求错开到不同分钟**,而不是一个 agent turn 里处理所有板块。计划拆成几个错峰的小 cron job,比如:
-  - `08:00` 板块组1(AI算力+光模块)
-  - `08:05` 板块组2(银行保险)
-  - `08:10` 板块组3(医药消费)+ 用 OpenClaw 的 `session:custom-id` 自定义会话读取前两组的历史,汇总成一条完整消息再发微信(避免微信收到好几条零散消息)
-- prompt 里优先只用 `web_search` 的摘要判断方向,不逐条 `web_fetch` 抓全文;并限制"每个板块最多搜索1-2次"
-- cron job 配 `--fallbacks` 备用模型,真撞上限流时自动切换重试
+- **`fund-analyzer` 的 `/sector-report` 接口正常响应要 30-50 秒**(串行调用多个外部数据源),模型自己在 exec 命令外面套了 `timeout 5s`,直接把这个正常耗时当成"卡住"掐断了——prompt 里必须显式告诉模型"这个耗时是正常的,不要自己包 timeout,用 curl 自带的 `--max-time 90` 就够"
+- **`web_search` 工具默认按 `GEMINI_API_KEY` 自动选中的 `gemini` 搜索 provider 内部硬编码调用了 `models/gemini-2.5-flash`,而这个模型已经被 Google 对新用户下线,直接 404**,和我们自己配置的对话模型(`google/gemini-3.1-flash-lite-preview`)无关。改成 `configmap.yaml` 里显式指定 `tools.web.search.provider: "duckduckgo"`(key-free,已验证可用)绕开
+
+投递方式也没有走 OpenClaw 原生的聊天通道 `--announce`——微信通道(`Weixin`)还没做扫码登录,走不通。改成和每日简报一样复用 Server 酱:给 agent job 开 `--tools web_search,exec,write` 权限,prompt 里让模型自己写完分析后调 `weekly-push.js`(通用版 Server 酱推送脚本,读一个文本文件的内容原样推)完成投递,cron job 本身配 `--no-deliver`(不走 OpenClaw 自己的投递,避免因为没配聊天通道被标 error)。
+
+`--fallbacks google/gemini-2.5-flash` 只是同一个 Google Key 下的另一个模型——集群目前只配了 `GEMINI_API_KEY`,没有其他 provider 的 key,所以这个 fallback 防不住这个 Key 整体的配额上限,只能防单个模型自身的限流,后续要加真正独立的 fallback 需要再配一个其他 provider(如 `ANTHROPIC_API_KEY`)的 key。
 
 ## 架构
 
@@ -149,7 +148,22 @@ kubectl exec -n "$OPENCLAW_NAMESPACE" deploy/gateway -- openclaw cron list
 kubectl exec -n "$OPENCLAW_NAMESPACE" deploy/gateway -- openclaw cron run <jobId>   # 手动触发一次,不等到点
 ```
 
-**每周综合解读**:见上方"每周任务的限流设计",尚未实现。
+**每周综合解读**(`weekly-push.js`,已通过 `configmap.yaml` 打进 workspace):agent message 类型 cron job,让大模型拉取 `fund-analyzer` 的 `/sector-report` 数据 + `web_search` 近一周新闻,对 4 个板块各给一句"更贵/更热"还是"降温/修复"的方向判断,再自己调 `weekly-push.js` 推 Server 酱。具体设计取舍见上方"每周任务的实际实现"。
+
+```bash
+kubectl exec -n "$OPENCLAW_NAMESPACE" deploy/gateway -- sh -c \
+  'openclaw cron create "0 20 * * 0" "$(cat weekly-prompt.txt)" \
+  --name "基金每周综合解读" \
+  --tz Asia/Shanghai \
+  --tools web_search,exec,write \
+  --fallbacks google/gemini-2.5-flash \
+  --timeout-seconds 600 \
+  --no-deliver'
+```
+
+`weekly-prompt.txt`(完整 prompt 见 git 提交历史/`openclaw cron get <id>` 输出)要点:第 1 步用 `exec` 跑 `curl --max-time 90 http://fund-analyzer:8080/sector-report?sectors=...` 拿数据(必须显式告诉模型"这个接口正常要 30-50 秒,别自己包更短的 timeout",否则模型会习惯性加 `timeout 5s` 把正常请求当卡住掐断);第 2 步每个板块 `web_search` 1-2 次判断方向;第 3 步综合给出解读;第 4 步用 `write` 工具把结果存成文件;第 5 步用 `exec` 跑 `node weekly-push.js <文件> "标题"` 推送。周日晚 20:00(北京时间)跑,汇总一周数据和新闻,周一开盘前有缓冲。
+
+因为 prompt 是多行中文长文本,直接在 shell 里拼命令行容易被 ssh/kubectl exec 的多层引号搞乱,实际操作时建议:先把 prompt 写成本地文件 → base64 编码 → `kubectl exec -i ... -- sh -c 'base64 -d > /tmp/weekly-prompt.txt'` 传进 pod → 再用 `openclaw cron create ... "$(cat /tmp/weekly-prompt.txt)"` 一次性执行,只经过一层 shell,避免转义问题。
 
 ### 接入 ArgoCD
 
