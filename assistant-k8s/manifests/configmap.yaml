@@ -11,8 +11,18 @@ data:
   # 显式指定默认模型为 google/gemini-3.1-flash-lite-preview:集群目前只配了 GEMINI_API_KEY,
   # 不写这个的话 OpenClaw 内置默认模型是 openai/gpt-5.5,而 OPENAI_API_KEY 没配,
   # 会导致所有 agent 类型任务(比如以后的周报)因为缺认证直接失败。
+  # web_search 工具显式指定 duckduckgo:默认按 GEMINI_API_KEY 自动选中的 gemini 搜索
+  # provider 内部硬编码调用了 Google 已经下线给新用户的 models/gemini-2.5-flash,
+  # 实测直接 404,和我们自己配置的对话模型无关;duckduckgo 不需要 key,已验证可用。
   config.json: |
     {
+      "tools": {
+        "web": {
+          "search": {
+            "provider": "duckduckgo"
+          }
+        }
+      },
       "gateway": {
         "mode": "local",
         "bind": "custom",
