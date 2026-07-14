@@ -48,7 +48,15 @@
 
 投递方式也没有走 OpenClaw 原生的聊天通道 `--announce`——微信通道(`Weixin`)还没做扫码登录,走不通。改成和每日简报一样复用 Server 酱:给 agent job 开 `--tools web_search,exec,write` 权限,prompt 里让模型自己写完分析后调 `weekly-push.js`(通用版 Server 酱推送脚本,读一个文本文件的内容原样推)完成投递,cron job 本身配 `--no-deliver`(不走 OpenClaw 自己的投递,避免因为没配聊天通道被标 error)。
 
-`--fallbacks google/gemini-2.5-flash` 只是同一个 Google Key 下的另一个模型——集群目前只配了 `GEMINI_API_KEY`,没有其他 provider 的 key,所以这个 fallback 防不住这个 Key 整体的配额上限,只能防单个模型自身的限流,后续要加真正独立的 fallback 需要再配一个其他 provider(如 `ANTHROPIC_API_KEY`)的 key。
+`--fallbacks` 目前配的是 `google/gemini-3.5-flash`——集群目前只配了 `GEMINI_API_KEY`,没有其他 provider 的 key,所以这个 fallback 防不住这个 Key 整体的配额上限,只能防单个模型自身的限流,后续要加真正独立的 fallback 需要再配一个其他 provider(如 `ANTHROPIC_API_KEY`)的 key。
+
+**2026-07-12 第一次真正到点跑的排查记录**(用户反馈没收到周报,复盘发现 3 个独立问题,已全部修复并各自手动触发验证过):
+
+- **模型误把推送脚本当成需要修的东西,自己用 `write` 工具去重写 `weekly-push.js`,因为文件是 initContainer 以 root 身份 `cp` 进去的、`node` 用户没有写权限,`write` 调用直接 `EACCES` 报错,导致整个 agent turn 崩溃退出,从未执行到第5步真正推送**。权限报错本身是好事(避免了脚本被写坏),但 prompt 里没提前说清楚"这个文件不用碰",模型自己意会错了。修复:prompt 里明确加一条"`weekly-push.js` 是现成脚本,只能用 exec 调用,绝对不要用 write 创建/修改它"
+- **`--fallbacks google/gemini-2.5-flash` 这个 fallback 模型本身就是坏的**(同样是已下线给新用户的模型,一调用就 404),等于从来没真正生效过——用 `openclaw infer model run --model <name> --prompt hi` 挨个探测 `google/` 系列模型后确认 `gemini-2.5-flash`、`gemini-2.5-flash-lite` 都 404,`gemini-2.5-pro` 免费层配额是 0(永久 429),真正能用的备用模型是 `gemini-3-flash-preview` / `gemini-3.5-flash`。已把 fallback 改成 `google/gemini-3.5-flash`
+- **最隐蔽的一个坑:exec 工具默认 `yieldMs` 只有 10 秒**(10000ms),超过这个时长的命令会被自动转入后台执行、只返回一个"还在跑"的会话而不是真正结果——而 fund-analyzer 接口正常要 30-50 秒,远超这个默认阈值。模型拿到的是一个未完成的后台任务,又没被告知要怎么轮询,只能如实(但具有误导性地)汇报"接口没响应/超时"。之前一直以为 `curl --max-time 90` 就够、"接口偶尔失败"是外部数据源不稳定,直到反复用同样的 curl 直接在 pod 里手动测都能 33 秒内正常返回 200,才定位到是 exec 工具本身的自动转后台行为在捣鬼。修复:prompt 里明确要求调用 exec 时显式传 `yieldMs: 95000`,不让它在拿到真实数据前提前转后台
+
+这几个坑印证了一件事:**"cron job 跑完了、状态是 ok"不代表任务真的按预期完成了**——`lastRunStatus: ok` 只说明 agent turn 没有崩溃报错,具体做没做对、数据是不是真的、有没有偷偷走了降级路径,只能读 `cron runs --id <id>` 里 agent 自己写的 `summary`,必要时对照 pod 日志(`kubectl logs`)里的 `[tools]` 行和直接手动复现原始命令来交叉验证,不能只看 status 字段就认为万事大吉。
 
 ## 架构
 
@@ -156,12 +164,12 @@ kubectl exec -n "$OPENCLAW_NAMESPACE" deploy/gateway -- sh -c \
   --name "基金每周综合解读" \
   --tz Asia/Shanghai \
   --tools web_search,exec,write \
-  --fallbacks google/gemini-2.5-flash \
+  --fallbacks google/gemini-3.5-flash \
   --timeout-seconds 600 \
   --no-deliver'
 ```
 
-`weekly-prompt.txt`(完整 prompt 见 git 提交历史/`openclaw cron get <id>` 输出)要点:第 1 步用 `exec` 跑 `curl --max-time 90 http://fund-analyzer:8080/sector-report?sectors=...` 拿数据(必须显式告诉模型"这个接口正常要 30-50 秒,别自己包更短的 timeout",否则模型会习惯性加 `timeout 5s` 把正常请求当卡住掐断);第 2 步每个板块 `web_search` 1-2 次判断方向;第 3 步综合给出解读;第 4 步用 `write` 工具把结果存成文件;第 5 步用 `exec` 跑 `node weekly-push.js <文件> "标题"` 推送。周日晚 20:00(北京时间)跑,汇总一周数据和新闻,周一开盘前有缓冲。
+`weekly-prompt.txt`(完整 prompt 见 git 提交历史/`openclaw cron get <id>` 输出)要点:第 1 步用 `exec` 跑 `curl --max-time 90 http://fund-analyzer:8080/sector-report?sectors=...` 拿数据,必须显式传 `yieldMs: 95000`(exec 工具默认 10 秒就自动转后台,不传这个参数会拿到一个"还在跑"的假结果),并且要告诉模型"这个接口正常要 30-50 秒,别自己包更短的 timeout"(否则模型会习惯性加 `timeout 5s` 把正常请求当卡住掐断),失败了要重试一次、如实汇报成败不能编;第 2 步每个板块 `web_search` 1-2 次判断方向(DuckDuckGo 偶尔会报 bot-detection,换个更短的关键词重试一次,还是不行就跳过这个板块的新闻部分、别放弃整个任务);第 3 步综合给出解读;第 4 步用 `write` 工具把结果存成文件(如果第1步数据确实没拿到,要在文本开头如实注明);第 5 步用 `exec` 原样跑 `node weekly-push.js <文件> "标题"` 推送——`weekly-push.js` 是现成脚本,prompt 里要明确禁止模型用 `write` 去"修"这个文件(它是 root 拷进去的,`node` 用户没写权限,乱写会导致 `EACCES` 直接崩溃整个任务)。周日晚 20:00(北京时间)跑,汇总一周数据和新闻,周一开盘前有缓冲。
 
 因为 prompt 是多行中文长文本,直接在 shell 里拼命令行容易被 ssh/kubectl exec 的多层引号搞乱,实际操作时建议:先把 prompt 写成本地文件 → base64 编码 → `kubectl exec -i ... -- sh -c 'base64 -d > /tmp/weekly-prompt.txt'` 传进 pod → 再用 `openclaw cron create ... "$(cat /tmp/weekly-prompt.txt)"` 一次性执行,只经过一层 shell,避免转义问题。
 
