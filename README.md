@@ -133,7 +133,22 @@ kubectl run -it --rm debug --image=curlimages/curl -n $OPENCLAW_NAMESPACE -- \
 
 cron job 实际存放在 gateway 容器内 `~/.openclaw/cron/jobs.json`(PVC 上,不受 ConfigMap/GitOps 管理),所以每次新增/改动 cron job,部署完 manifests 之后还要额外 `kubectl exec` 进 gateway 容器手动注册一次(和 `gateway-secrets` 一样,是有意不放进 Git 的运行时状态)。
 
-**每日简报**(`daily-report.js`,已通过 `configmap.yaml` 打进 workspace):纯脚本调用 `fund-analyzer` 的 `/sector-report` 接口,拿板块估值报告,直接用 Server 酱 SendKey(`SERVERCHAN_SENDKEY`,已经是 gateway 容器的环境变量)推送微信,不经过大模型,零 token 成本。要监控的板块写死在脚本里的 `SECTORS` 常量(目前是 `analyze_fund.py` 里 `SECTOR_BASKETS` 已定义的全部 4 个:银行保险/医药消费/光模块/计算),板块名必须跟 `SECTOR_BASKETS` 的 key 完全一致;改了要同步改这个常量并重新 `./deploy.sh`。
+**每日简报**(`daily-report.js`,已通过 `configmap.yaml` 打进 workspace):纯脚本并发调用 `fund-analyzer` 的 `/sector-report`(板块估值,写死在 `SECTORS` 常量,目前是 `analyze_fund.py` 里 `SECTOR_BASKETS` 已定义的全部 4 个:银行保险/医药消费/光模块/计算,板块名必须跟 `SECTOR_BASKETS` 的 key 完全一致)和 `/report`(个人持仓的单只基金,写死在 `FUNDS` 常量),两个结果拼成一条消息,直接用 Server 酱 SendKey(`SERVERCHAN_SENDKEY`,已经是 gateway 容器的环境变量)推送微信,不经过大模型,零 token 成本。改了要同步改对应常量并重新 `./deploy.sh` + `kubectl rollout restart deployment/gateway`(configmap 改动不会自动触发 initContainer 重新拷贝文件)。
+
+`FUNDS` 常量里每只基金除了代码,还手工标注了品类(`category`)和细分品类(`sub`)——`fund-analyzer` 的 `/report` 接口本身只返回 akshare 的"基金类型"字段(这几只全是"股票型-标准指数",区分不出各自跟踪的细分行业/主题),细分品类是看基金名称/业绩比较基准人工归类的,新增基金时要照着补一行:
+
+```js
+const FUNDS = [
+  { code: '000950', category: '股票型-指数(沪深300细分行业)', sub: '非银金融' },
+  { code: '001594', category: '股票型-指数(中证行业指数)', sub: '银行' },
+  { code: '001344', category: '股票型-指数(沪深300细分行业)', sub: '医药' },
+  { code: '000248', category: '股票型-指数(中证主题指数)', sub: '主要消费' },
+  { code: '015876', category: '股票型-指数(中证主题指数)', sub: '消费电子' },
+  { code: '018103', category: '股票型-指数(中证主题指数,港股通)', sub: '港股消费' },
+];
+```
+
+`/sector-report` 和 `/report` 都要串行调用多个外部数据源、单次耗时 30-70 秒不等(个股比板块慢,因为 `analyze()` 每只基金要拉基准指数估值+净值+持仓+行业配置+同类排名+仓位一共 6+ 个数据源),脚本里用 `Promise.all` 并发发起这两个请求而不是依次等,总耗时取两者中较慢的一个而不是相加(实测约 40-70 秒)。因为个股请求比原来单独的板块请求慢,`--timeout-seconds` 从最初的 60 上调到了 150,留出足够余量。
 
 工作日早上 7:30 跑一次——场外基金净值要等收盘后当晚才公布,选第二天早上而不是收盘后立即跑,是为了确保拿到的是上一交易日收盘后已经公布完的最新净值,出门/开盘前就能看到。
 
@@ -142,7 +157,7 @@ kubectl exec -n "$OPENCLAW_NAMESPACE" deploy/gateway -- \
   openclaw cron create "30 7 * * 1-5" \
   --command "node ~/.openclaw/workspace/daily-report.js" \
   --name "基金每日简报" \
-  --timeout-seconds 60 \
+  --timeout-seconds 150 \
   --tz Asia/Shanghai \
   --no-deliver
 ```

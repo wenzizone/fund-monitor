@@ -71,6 +71,17 @@ data:
     const https = require('https');
 
     const SECTORS = ['银行保险', '医药消费', '光模块', '计算'];
+    // 单独盯盘的个人持仓基金。品类/细分品类是人工标注(fund-analyzer 的 /report
+    // 接口本身只返回 akshare 的"基金类型"字段,值统一是"股票型-标准指数",
+    // 区分不出跟踪的具体细分行业/主题,所以在这里维护一份对照表,拼进推送文案)。
+    const FUNDS = [
+      { code: '000950', category: '股票型-指数(沪深300细分行业)', sub: '非银金融' },
+      { code: '001594', category: '股票型-指数(中证行业指数)', sub: '银行' },
+      { code: '001344', category: '股票型-指数(沪深300细分行业)', sub: '医药' },
+      { code: '000248', category: '股票型-指数(中证主题指数)', sub: '主要消费' },
+      { code: '015876', category: '股票型-指数(中证主题指数)', sub: '消费电子' },
+      { code: '018103', category: '股票型-指数(中证主题指数,港股通)', sub: '港股消费' },
+    ];
     const SENDKEY = process.env.SERVERCHAN_SENDKEY;
 
     function get(url) {
@@ -119,9 +130,22 @@ data:
         process.exit(1);
       }
       try {
-        const url = `http://fund-analyzer:8080/sector-report?sectors=${encodeURIComponent(SECTORS.join(','))}`;
-        const report = await get(url);
-        const { status, data } = await push('板块监控日报', report);
+        const sectorUrl = `http://fund-analyzer:8080/sector-report?sectors=${encodeURIComponent(SECTORS.join(','))}`;
+        const fundsUrl = `http://fund-analyzer:8080/report?codes=${encodeURIComponent(FUNDS.map((f) => f.code).join(','))}`;
+        // 板块报告和个股报告各要 30-70 秒(串行调用外部数据源),并发拉取而不是
+        // 依次拉取,总耗时取两者较慢的一个,而不是两者相加。
+        const [sectorReport, fundsReport] = await Promise.all([get(sectorUrl), get(fundsUrl)]);
+
+        const fundsHeader = FUNDS.map((f) => `${f.code}: ${f.category} / ${f.sub}`).join('\n');
+        const combined = [
+          sectorReport,
+          '=== 个股基金监控(品类 / 细分品类) ===',
+          fundsHeader,
+          '',
+          fundsReport,
+        ].join('\n');
+
+        const { status, data } = await push('板块监控日报', combined);
         if (status >= 400) {
           console.error(`Server酱 push failed: ${status} ${data}`);
           process.exit(1);
