@@ -135,6 +135,8 @@ cron job 实际存放在 gateway 容器内 `~/.openclaw/cron/jobs.json`(PVC 上,
 
 **每日简报**(`daily-report.js`,已通过 `configmap.yaml` 打进 workspace):纯脚本并发调用 `fund-analyzer` 的 `/sector-report`(板块估值,写死在 `SECTORS` 常量,目前是 `analyze_fund.py` 里 `SECTOR_BASKETS` 已定义的全部 4 个:银行保险/医药消费/光模块/计算,板块名必须跟 `SECTOR_BASKETS` 的 key 完全一致)和 `/report`(个人持仓的单只基金,写死在 `FUNDS` 常量),两个结果拼成一条消息,直接用 Server 酱 SendKey(`SERVERCHAN_SENDKEY`,已经是 gateway 容器的环境变量)推送微信,不经过大模型,零 token 成本。改了要同步改对应常量并重新 `./deploy.sh` + `kubectl rollout restart deployment/gateway`(configmap 改动不会自动触发 initContainer 重新拷贝文件)。
 
+**2026-07-15 踩过一次坑**:改完 `daily-report.js` 后 apply configmap + rollout restart + 手动 `cron run` 测试,cron job 显示 `pushed ok`,但推给微信的内容里没有新加的个股部分——排查发现当时 `kubectl exec ... cat ~/.openclaw/workspace/daily-report.js` 打印出来的还是改之前的旧内容,配合 `fund-analyzer` 的访问日志确认那次测试只打了 `/sector-report` 一个接口、根本没碰 `/report`。说明 apply + restart 这两步虽然都返回成功,但 pod 里实际跑的脚本还没换成新版(具体是哪一步没生效没细究,重新老老实实按顺序走一遍 apply → restart → `cat` 确认 pod 里文件内容 → 再 `cron run` 就正常了)。教训:**改完 configmap 触发重启后,不能只看 `rollout status` 说 successfully 就当作生效了,最好直接 `kubectl exec ... cat <文件>` 确认 pod 里的实际文件内容,再触发测试**,不然会得到一个"状态 ok 但其实没按新逻辑跑"的假阳性结果——和上面"每周任务"那几个坑同一个性质的教训。
+
 `FUNDS` 常量里每只基金除了代码,还手工标注了品类(`category`)和细分品类(`sub`)——`fund-analyzer` 的 `/report` 接口本身只返回 akshare 的"基金类型"字段(这几只全是"股票型-标准指数",区分不出各自跟踪的细分行业/主题),细分品类是看基金名称/业绩比较基准人工归类的,新增基金时要照着补一行:
 
 ```js
