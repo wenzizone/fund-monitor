@@ -43,7 +43,10 @@ data:
             "primary": "google/gemini-3.1-flash-lite-preview"
           },
           "models": {
-            "google/gemini-3.1-flash-lite-preview": {}
+            "google/gemini-3.1-flash-lite-preview": {},
+            "google/gemini-3.5-flash": {},
+            "openrouter/nvidia/nemotron-3-nano-30b-a3b:free": {},
+            "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free": {}
           }
         },
         "list": [
