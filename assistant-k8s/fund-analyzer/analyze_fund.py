@@ -57,6 +57,11 @@ def parse_benchmark_weights(benchmark: str) -> list[tuple[str, float]]:
         idx = benchmark.find(name)
         if idx == -1:
             continue
+        # 必须紧跟"指数"两个字才认,排除"沪深300非银行金融指数"这种把细分行业/主题
+        # 子指数名字夹在宽基指数名字和"指数"之间的情况——子指数的估值走势和宽基完全
+        # 不是一回事,误匹配成宽基会算出一个跟基金实际跟踪标的无关的估值百分位。
+        if benchmark[idx + len(name):idx + len(name) + 2] != "指数":
+            continue
         m = re.search(r"\*\s*(\d+(?:\.\d+)?)\s*%", benchmark[idx:idx + 20])
         weight = float(m.group(1)) / 100 if m else None
         matches.append((name, weight))
