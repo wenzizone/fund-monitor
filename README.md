@@ -69,25 +69,25 @@
 
 ## 架构
 
-```
-              本地开发/命令行
-              python3 analyze_fund.py <代码>
-                      │
-                      ▼
-            ┌─────────────────────┐
-            │   analyze_fund.py     │  核心分析逻辑,akshare 数据源
-            └───────────┬─────────┘
-                        │ import
-            ┌───────────▼─────────┐
-            │      server.py        │  纯标准库 HTTP 包装
-            └───────────┬─────────┘
-                        │ 打包进 ConfigMap(kustomize configMapGenerator)
-   ================== K8s 集群(同一 namespace) ==================
-            ┌─────────────────────┐         ┌─────────────────────┐
-            │  Deployment           │  HTTP   │  Deployment           │
-            │  fund-analyzer        │◀───────│  gateway              │──▶ 微信
-            │  (python:3.12-slim)   │  :8080  │  (官方镜像 + cron)     │
-            └─────────────────────┘         └─────────────────────┘
+```mermaid
+flowchart TD
+    CLI["本地开发/命令行<br/>python3 analyze_fund.py 基金代码"]
+    AF["analyze_fund.py<br/>核心分析逻辑,akshare 数据源"]
+    SRV["server.py<br/>纯标准库 HTTP 包装"]
+    WX(("微信"))
+
+    CLI --> AF
+    AF -->|import| SRV
+
+    subgraph K8S["K8s 集群(同一 namespace)"]
+        direction LR
+        FA["Deployment fund-analyzer<br/>(python:3.12-slim)"]
+        GW["Deployment gateway<br/>(官方镜像 + cron)"]
+        GW -->|"HTTP :8080"| FA
+    end
+
+    SRV -->|"打包进 ConfigMap<br/>(kustomize configMapGenerator)"| FA
+    GW --> WX
 ```
 
 两个 Deployment 故意拆开、互不依赖:改分析脚本只重启 `fund-analyzer`,不影响 OpenClaw 的微信会话状态。
