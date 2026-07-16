@@ -48,7 +48,9 @@
 
 投递方式也没有走 OpenClaw 原生的聊天通道 `--announce`——微信通道(`Weixin`)还没做扫码登录,走不通。改成和每日简报一样复用 Server 酱:给 agent job 开 `--tools web_search,exec,write` 权限,prompt 里让模型自己写完分析后调 `weekly-push.js`(通用版 Server 酱推送脚本,读一个文本文件的内容原样推)完成投递,cron job 本身配 `--no-deliver`(不走 OpenClaw 自己的投递,避免因为没配聊天通道被标 error)。
 
-`--fallbacks` 目前配的是 `google/gemini-3.5-flash`——集群目前只配了 `GEMINI_API_KEY`,没有其他 provider 的 key,所以这个 fallback 防不住这个 Key 整体的配额上限,只能防单个模型自身的限流,后续要加真正独立的 fallback 需要再配一个其他 provider(如 `ANTHROPIC_API_KEY`)的 key。
+`--fallbacks` 目前配的是 `["google/gemini-3.5-flash", "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"]`。前者仍然是同一个 `GEMINI_API_KEY` 下的另一个模型,防不住这个 Key 整体的配额上限;**2026-07-16 补了 `OPENROUTER_API_KEY`(免费 key)之后,加上了第二个 fallback,才算有了真正独立 provider 的兜底**——`deployment.yaml` 里其实一开始就预留了 `OPENROUTER_API_KEY` 的 `secretKeyRef`(`optional: true`),不需要改任何 manifest,只要把 key 值 `kubectl patch` 进 `gateway-secrets`(密钥不进 Git/ArgoCD,做法同其余几个 key)、重启一次 gateway pod 就生效。
+
+选型时用 `openclaw infer model run --model openrouter/<name> --prompt hi` 挨个探测了 OpenRouter 免费列表里量级较大的几个模型,发现一个反直觉的情况:参数量最大、按理最强的几个(`qwen/qwen3-next-80b-a3b-instruct:free`、`meta-llama/llama-3.3-70b-instruct:free`、`nousresearch/hermes-3-llama-3.1-405b:free`)反复 429,免费共享池被挤爆、不可靠;真正能稳定跑通的是 30B 这个量级的 `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free`(推理增强版,中文回复正常),所以最终选了这个——量级上大致和 Gemini flash-lite 同档,不算能力升级,但解决了"独立配额兜底"这个真实需求。免费额度是 20次/分钟、50次/天(充值满 $10 lifetime 涨到 1000次/天),每周任务一周一次、单次十几个工具调用,远用不到这个上限。
 
 **2026-07-12 第一次真正到点跑的排查记录**(用户反馈没收到周报,复盘发现 3 个独立问题,已全部修复并各自手动触发验证过):
 
@@ -185,7 +187,7 @@ kubectl exec -n "$OPENCLAW_NAMESPACE" deploy/gateway -- sh -c \
   --name "基金每周综合解读" \
   --tz Asia/Shanghai \
   --tools web_search,exec,write \
-  --fallbacks google/gemini-3.5-flash \
+  --fallbacks "google/gemini-3.5-flash,openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free" \
   --timeout-seconds 600 \
   --no-deliver'
 ```
