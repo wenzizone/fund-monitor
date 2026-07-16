@@ -52,6 +52,13 @@
 
 选型时用 `openclaw infer model run --model openrouter/<name> --prompt hi` 挨个探测了 OpenRouter 免费列表里量级较大的几个模型,发现一个反直觉的情况:参数量最大、按理最强的几个(`qwen/qwen3-next-80b-a3b-instruct:free`、`meta-llama/llama-3.3-70b-instruct:free`、`nousresearch/hermes-3-llama-3.1-405b:free`)反复 429,免费共享池被挤爆、不可靠;真正能稳定跑通的是 30B 这个量级的 `nvidia/nemotron-3-nano-30b-a3b:free`(纯 instruct 版,中文回复正常;免费列表里还有个 `-omni-...-reasoning` 后缀的推理增强变体,会默认输出思维链、多耗 token 和延迟,对这种多步骤 tool-calling 场景没必要,没选它),所以最终选了这个——量级上大致和 Gemini flash-lite 同档,不算能力升级,但解决了"独立配额兜底"这个真实需求。免费额度是 20次/分钟、50次/天(充值满 $10 lifetime 涨到 1000次/天),每周任务一周一次、单次十几个工具调用,远用不到这个上限。
 
+**2026-07-16 用真实的完整每周任务(不是简单探测)对比了纯 instruct 版和 `-omni-...-reasoning` 推理增强版**,方法是临时把两个模型都加进 `agents.defaults.models` 白名单(`--model` 覆盖只能用白名单里的模型,cron 和临时 `openclaw agent` 命令都受这个限制,不在名单里会在真正调用模型前就直接被拒,不消耗 token),然后分别用 `--model` 强制指定、手动触发一次完整流程:
+
+- **纯 instruct 版**:85 秒完成,自评"已完成所有步骤,周报已成功推送",实际检查 `weekly-report-tmp.txt` 的修改时间落在这次运行的时间窗口内,确认是真的重新生成的内容。消耗约 41.5K input / 4.2K output token。
+- **推理增强版**:119 秒完成(比纯 instruct 版慢 40%,符合"多一轮思维链"的预期),同样自评"任务已成功完成",但检查 `weekly-report-tmp.txt` 的修改时间,发现**这次运行压根没有更新这个文件**——它的时间戳落在上一次(纯 instruct 版那次)运行的窗口内,说明推理增强版这次运行大概率跳过了第 4 步(`write` 重新生成报告),直接拿旧文件去跑第 5 步推送,却仍然汇报"成功"。这是通过 `fund-analyzer` 访问日志(确认两次都真的调了 `/sector-report`)和文件 mtime 比对才发现的,cron 状态本身两次都显示 `ok`,完全看不出区别。
+
+这次对比印证了两点:(1) 免费的 30B 量级模型确实能扛住这个多步骤任务的大部分流程(包括 exec 调用、web_search 失败重试降级);(2) **推理增强版这次实测出现了"汇报成功但实际漏做一步"的问题,进一步验证了当初"选纯 instruct 版更保守"的判断是对的**——不过这只是一次实测,不是大样本结论,不代表这个模型必然不可靠,只是目前没有理由为了推理能力去承担这个已经实测出现过的风险。测试用完之后已经清掉 `--model` 覆盖,cron job 恢复正常的 primary+fallback 逻辑,`agents.defaults.models` 白名单里的这几个测试用条目先保留,方便以后需要时不用再走一次 ArgoCD 同步。
+
 **2026-07-12 第一次真正到点跑的排查记录**(用户反馈没收到周报,复盘发现 3 个独立问题,已全部修复并各自手动触发验证过):
 
 - **模型误把推送脚本当成需要修的东西,自己用 `write` 工具去重写 `weekly-push.js`,因为文件是 initContainer 以 root 身份 `cp` 进去的、`node` 用户没有写权限,`write` 调用直接 `EACCES` 报错,导致整个 agent turn 崩溃退出,从未执行到第5步真正推送**。权限报错本身是好事(避免了脚本被写坏),但 prompt 里没提前说清楚"这个文件不用碰",模型自己意会错了。修复:prompt 里明确加一条"`weekly-push.js` 是现成脚本,只能用 exec 调用,绝对不要用 write 创建/修改它"
