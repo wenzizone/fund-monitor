@@ -32,10 +32,10 @@
 - [x] `server.py` HTTP 包装,本地验证通过
 - [x] `assistant-k8s/fund-analyzer/` K8s manifests(Kustomize,ArgoCD-ready),本地 `kubectl kustomize` 渲染验证通过
 - [x] `assistant-k8s/manifests/` OpenClaw 官方 K8s manifests,已改 `cron.enabled: true`
-- [ ] 实际部署到目标集群
+- [x] 实际部署到目标集群(oke-qa,`hv-test` namespace)
 - [ ] OpenClaw 微信 channel 配置(扫码登录)
 - [x] OpenClaw cron job 配置——**每日**部分已实现(`assistant-k8s/manifests/configmap.yaml` 里的 `daily-report.js`,部署后见下方"定时任务"一节手动注册);**每周**部分也已实现(agent message 类型 cron job,见下方"定时任务"一节)
-- [ ] (可选)接入 ArgoCD
+- [x] 接入 ArgoCD——2026-07-16 排查另一个 bug 时才发现集群上 `gateway-config`/`fund-analyzer` 这些资源本身已经带了 `argocd.argoproj.io/tracking-id` 标记,说明这个仓库已经被公司共享 ArgoCD 接管在同步了(不是走本仓库这边发起的,大概率是运维那边独立配置的 Application),这个仓库里之前一直没人更新这条状态。细节和踩过的坑见下方"接入 ArgoCD"一节。
 
 ### 每周任务的实际实现
 
@@ -135,7 +135,11 @@ cron job 实际存放在 gateway 容器内 `~/.openclaw/cron/jobs.json`(PVC 上,
 
 **每日简报**(`daily-report.js`,已通过 `configmap.yaml` 打进 workspace):纯脚本并发调用 `fund-analyzer` 的 `/sector-report`(板块估值,写死在 `SECTORS` 常量,目前是 `analyze_fund.py` 里 `SECTOR_BASKETS` 已定义的全部 4 个:银行保险/医药消费/光模块/计算,板块名必须跟 `SECTOR_BASKETS` 的 key 完全一致)和 `/report`(个人持仓的单只基金,写死在 `FUNDS` 常量),两个结果拼成一条消息,直接用 Server 酱 SendKey(`SERVERCHAN_SENDKEY`,已经是 gateway 容器的环境变量)推送微信,不经过大模型,零 token 成本。改了要同步改对应常量并重新 `./deploy.sh` + `kubectl rollout restart deployment/gateway`(configmap 改动不会自动触发 initContainer 重新拷贝文件)。
 
-**2026-07-15 踩过一次坑**:改完 `daily-report.js` 后 apply configmap + rollout restart + 手动 `cron run` 测试,cron job 显示 `pushed ok`,但推给微信的内容里没有新加的个股部分——排查发现当时 `kubectl exec ... cat ~/.openclaw/workspace/daily-report.js` 打印出来的还是改之前的旧内容,配合 `fund-analyzer` 的访问日志确认那次测试只打了 `/sector-report` 一个接口、根本没碰 `/report`。说明 apply + restart 这两步虽然都返回成功,但 pod 里实际跑的脚本还没换成新版(具体是哪一步没生效没细究,重新老老实实按顺序走一遍 apply → restart → `cat` 确认 pod 里文件内容 → 再 `cron run` 就正常了)。教训:**改完 configmap 触发重启后,不能只看 `rollout status` 说 successfully 就当作生效了,最好直接 `kubectl exec ... cat <文件>` 确认 pod 里的实际文件内容,再触发测试**,不然会得到一个"状态 ok 但其实没按新逻辑跑"的假阳性结果——和上面"每周任务"那几个坑同一个性质的教训。
+**2026-07-15 踩过一次坑,2026-07-16 才搞清楚真正原因**:改完 `daily-report.js` 后 apply configmap + rollout restart + 手动 `cron run` 测试,cron job 显示 `pushed ok`,但推给微信的内容里没有新加的个股部分——当时 `kubectl exec ... cat ~/.openclaw/workspace/daily-report.js` 打印出来的还是改之前的旧内容,一开始以为是 apply/restart 哪一步有时序问题,重新走一遍"apply → restart → cat 确认文件内容 → 再测试"就正常了,没深究根本原因。
+
+第二天改 `analyze_fund.py` 修另一个 bug 时,同样的手动 `kubectl apply` 又被悄悄"打回原形"——这次才发现 `gateway-config`/`fund-analyzer` 这些资源本身带着 `argocd.argoproj.io/tracking-id` 标记(集群里没有 ArgoCD 自己的 pod,应该是公司共享的 ArgoCD 控制面在别的管理集群上跑,通过这个 tracking-id 远程接管的),**真正原因是 ArgoCD 在按 Git 里的内容周期性自动同步,任何还没提交到 Git 的手动 `kubectl apply`/`rollout restart` 都会在它下一次同步时被撤销**,和 7-15 那次"时序问题"的猜测完全是两回事——只是当时凑巧重新走一遍手动流程时,ArgoCD 还没来得及同步回去,给了一个"重新走一遍就好了"的假象。
+
+教训:**这个集群是 ArgoCD 托管的,改完线上资源要先 `git commit`+`push`,manual `kubectl apply` 只是临时手段、迟早会被同步覆盖回 Git 的状态**;验证改动是否真正生效,不能只看 `rollout status` 说 successfully 或 cron 状态 `pushed ok`,要直接 `kubectl exec ... cat <文件>` 确认 pod 里的实际文件内容——这条本身没错,但配合"先提交 Git 再等 ArgoCD 同步(或观察 `spec.template.spec.volumes` 里的 configmap 哈希是否变成新的)"才是治本的做法。
 
 `FUNDS` 常量里每只基金除了代码,还手工标注了品类(`category`)和细分品类(`sub`)——`fund-analyzer` 的 `/report` 接口本身只返回 akshare 的"基金类型"字段(这几只全是"股票型-标准指数",区分不出各自跟踪的细分行业/主题),细分品类是看基金名称/业绩比较基准人工归类的,新增基金时要照着补一行:
 
@@ -197,6 +201,10 @@ kubectl exec -n "$OPENCLAW_NAMESPACE" deploy/gateway -- sh -c \
 `fund-analyzer` 的 `analyze_fund.py`/`server.py` 两个脚本的"正本"实际就放在 `assistant-k8s/fund-analyzer/` 目录内部,仓库根目录那两个是指向它们的**软链接**(方便本地继续用 `python3 analyze_fund.py` 这种习惯用法)。这么做是为了让 `configMapGenerator` 只引用自己目录内的文件——一开始的版本是从仓库根目录跨目录引用的,结果部署到公司共享的 ArgoCD 时才发现:那样需要在 `argocd-cm` 里加 `kustomize.buildOptions: "--load-restrictor LoadRestrictionsNone"` 这种全局配置,而这是 Helm 管理的共享生产配置,手动改了下次 `helm upgrade` 大概率会被覆盖回去,属于治标不治本,所以改成了现在这个自包含的目录结构,彻底不依赖任何外部配置。
 
 **OpenClaw 的密钥(`gateway-secrets`)不要交给 ArgoCD 管**,继续保持现在这样手动 `--create-secret` 一次性创建——密钥不应该以任何形式进 Git。
+
+**2026-07-16 补充:这个 Application 其实已经建好了,只是这个仓库这边一直没人记录**。排查 `analyze_fund.py` 的一个 bug 时,发现集群上 `gateway-config`/`fund-analyzer` 这些资源本身带着 `argocd.argoproj.io/tracking-id: argocd_hv-test:...` 标记,但这个 hv-test 集群里翻遍所有 namespace 都没有 ArgoCD 自己的 pod(只有名字很像的 `argo-rollouts`,是完全不同的另一个工具,别搞混)——说明真正的 ArgoCD 控制面跑在别的、我们这边访问不到的管理集群上,通过某个 Application 远程接管了这几个资源,而且大概率是运维那边独立配置的,不是从这个仓库这边发起注册的。
+
+这件事最大的影响是**手动 `kubectl apply`/`rollout restart` 只是临时的、会被下一次自动同步周期覆盖回 Git 当前的状态**——线上改配置、改代码,必须先 `git commit` + `push`,再等 ArgoCD 同步(实测同步延迟在几分钟量级,没有直接访问权限去手动触发 `argocd app sync`,只能等)。想确认到底同步了没有,直接看资源 spec 里引用的 configmap 哈希后缀变没变最直接(`kubectl get deployment <name> -o jsonpath='{.spec.template.spec.volumes}'`),比等 `rollout status` 或 cron 状态更可靠。
 
 ## 配置参数
 
