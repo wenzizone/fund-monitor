@@ -33,7 +33,7 @@
 - [x] `assistant-k8s/fund-analyzer/` K8s manifests(Kustomize,ArgoCD-ready),本地 `kubectl kustomize` 渲染验证通过
 - [x] `assistant-k8s/manifests/` OpenClaw 官方 K8s manifests,已改 `cron.enabled: true`
 - [x] 实际部署到目标集群(oke-qa,`hv-test` namespace)
-- [ ] OpenClaw 微信 channel 配置(扫码登录)
+- [x] 微信投递——**没有走 OpenClaw 原生的微信 channel(那个还没做扫码登录,也没打算做)**,每日/每周两个 cron job 都是复用 Server 酱(`SERVERCHAN_SENDKEY`)推送,已验证稳定工作,细节见下方"定时任务"一节
 - [x] OpenClaw cron job 配置——**每日**部分已实现(`assistant-k8s/manifests/configmap.yaml` 里的 `daily-report.js`,部署后见下方"定时任务"一节手动注册);**每周**部分也已实现(agent message 类型 cron job,见下方"定时任务"一节)
 - [x] 接入 ArgoCD——2026-07-16 排查另一个 bug 时才发现集群上 `gateway-config`/`fund-analyzer` 这些资源本身已经带了 `argocd.argoproj.io/tracking-id` 标记,说明这个仓库已经被公司共享 ArgoCD 接管在同步了(不是走本仓库这边发起的,大概率是运维那边独立配置的 Application),这个仓库里之前一直没人更新这条状态。细节和踩过的坑见下方"接入 ArgoCD"一节。
 
@@ -90,7 +90,7 @@ flowchart TD
     GW --> WX
 ```
 
-两个 Deployment 故意拆开、互不依赖:改分析脚本只重启 `fund-analyzer`,不影响 OpenClaw 的微信会话状态。
+两个 Deployment 故意拆开、互不依赖:改分析脚本只重启 `fund-analyzer`,不影响 OpenClaw 的 cron/会话状态。
 
 ## 部署
 
@@ -125,7 +125,7 @@ export OPENCLAW_NAMESPACE=gateway    # 必须和上面一致,两者要在同一 
 验证:
 
 ```bash
-kubectl port-forward svc/gateway 18789:18789 -n $OPENCLAW_NAMESPACE   # 打开控制台配置微信登录
+kubectl port-forward svc/gateway 18789:18789 -n $OPENCLAW_NAMESPACE   # 打开控制台看 cron job 状态(不是配微信,见下方说明)
 kubectl run -it --rm debug --image=curlimages/curl -n $OPENCLAW_NAMESPACE -- \
   curl "http://fund-analyzer:8080/report?codes=017234"                # 验证分析服务
 ```
@@ -235,7 +235,7 @@ kubectl exec -n "$OPENCLAW_NAMESPACE" deploy/gateway -- sh -c \
 | `image: ghcr.io/openclaw/openclaw:slim` | `manifests/deployment.yaml` | OpenClaw 官方镜像,这套方案的前提是不自建镜像;这是唯一没有改名的地方,镜像本身就叫这个名字,改不掉 |
 | `image: python:3.12-slim` | `fund-analyzer/deployment.yaml` | 同上,fund-analyzer 也不自建镜像 |
 | `"cron": { "enabled": true }` | `manifests/configmap.yaml` | 我们特意从官方默认的 `false` 改成 `true`,关掉的话定时任务全部失效 |
-| `gateway.port: 18789` | `manifests/configmap.yaml` | 微信登录、控制台访问都依赖这个端口,改了要连带改 Service |
+| `gateway.port: 18789` | `manifests/configmap.yaml` | 控制台访问依赖这个端口(不是微信登录——微信投递走的是 Server 酱,不经过 OpenClaw 原生 channel),改了要连带改 Service |
 | Deployment/Service/PVC/ConfigMap/Secret 都叫 `gateway*` 不叫 `openclaw*` | `manifests/*.yaml` | 为了在公司共享的 ArgoCD/devops 仓库里不出现 "claw" 字样,把这几个 K8s 资源名从官方默认的 `openclaw`/`openclaw-secrets`/`openclaw-home-pvc`/`openclaw-config` 统一改成了 `gateway`/`gateway-secrets`/`gateway-home-pvc`/`gateway-config`。容器内配置文件名 `openclaw.json` 是程序读取配置时硬编码要找的文件名,改不了,只把它外面的目录 `/home/node/.gateway` 改了名 |
 | `containerPort: 8080` 及对应 `service.yaml` 的 `port/targetPort` | `fund-analyzer/` | 改端口必须 Deployment 和 Service 一起改,且 OpenClaw 调用的 URL 也要跟着改 |
 | ConfigMap 名称的哈希后缀(如 `fund-analyzer-scripts-mcdk9h585b`) | Kustomize 自动生成 | 不要手动指定或硬编码这个名字,Deployment 的引用由 Kustomize 自动同步 |
