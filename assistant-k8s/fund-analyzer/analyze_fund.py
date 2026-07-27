@@ -128,6 +128,13 @@ def get_top_holdings(code: str, top_n: int = 10) -> dict | None:
 def get_industry_allocation(code: str, top_n: int = 5) -> dict | None:
     df, err = _safe(ak.fund_portfolio_industry_allocation_em, symbol=code, date="2025")
     if df is None or df.empty:
+        # 东方财富这个接口对"联接基金"(持仓基本就是买入目标 ETF 本身,不像
+        # 主动管理型基金那样分散持仓)常常压根没有季度行业配置数据可披露,
+        # akshare 在这种空数据场景下会在内部尝试按 17 列重命名一个 0 列的
+        # DataFrame,抛出一个 pandas 原始报错(Length mismatch...),不是真的
+        # 代码出错,是数据源本来就没有——这里换成能看懂的说明,不暴露原始报错。
+        if err and "Length mismatch" in err:
+            return {"error": "该基金未披露行业配置数据(常见于联接基金,持仓集中于目标ETF,东方财富没有单独的行业分布)"}
         return {"error": err or "无行业配置数据"}
     latest_date = df["截止时间"].max()
     latest = df[df["截止时间"] == latest_date].sort_values("占净值比例", ascending=False).head(top_n)
