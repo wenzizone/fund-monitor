@@ -8,6 +8,8 @@
 """
 import re
 import sys
+import time
+from functools import lru_cache
 
 import akshare as ak
 import pandas as pd
@@ -27,6 +29,7 @@ VALUATION_LOOKBACK_YEARS = 10
 SECTOR_BASKETS: dict[str, list[tuple[str, str]]] = {
     "银行保险": [("600036", "招商银行"), ("601318", "中国平安"), ("601398", "工商银行")],
     "医药消费": [("600276", "恒瑞医药"), ("300760", "迈瑞医疗"), ("603259", "药明康德")],
+    "消费": [("600519", "贵州茅台"), ("000858", "五粮液"), ("600887", "伊利股份")],
     "光模块": [("300308", "中际旭创"), ("300502", "新易盛"), ("300394", "天孚通信")],
     "计算": [("600588", "用友网络"), ("600570", "恒生电子"), ("300454", "深信服")],
 }
@@ -159,8 +162,18 @@ def get_current_position(code: str) -> dict | None:
     return dict(zip(df["资产类型"], df["仓位占比"]))
 
 
+@lru_cache(maxsize=1)
+def _cached_market_position(cache_bucket: int):
+    return _safe(ak.fund_stock_position_lg)
+
+
 def get_market_position_sentiment() -> dict | None:
-    df, err = _safe(ak.fund_stock_position_lg)
+    # 这个数据是全市场通用的,不区分基金/板块,但调用方(/report 里每只基金、
+    # /sector-report 里每个板块)各自独立调用了一次——一次请求里可能重复打
+    # 这同一个外部接口好几次,容易被上游偶发的空响应/限流打断。缓存 5 分钟,
+    # 一次请求里的多次调用只真正打一次接口。
+    cache_bucket = int(time.time() // 300)
+    df, err = _cached_market_position(cache_bucket)
     if df is None:
         return {"error": err or "无市场仓位数据"}
     df = df.dropna()

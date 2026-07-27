@@ -73,7 +73,7 @@ data:
     const http = require('http');
     const https = require('https');
 
-    const SECTORS = ['银行保险', '医药消费', '光模块', '计算'];
+    const SECTORS = ['银行保险', '医药消费', '消费', '光模块', '计算'];
     // 单独盯盘的个人持仓基金。品类/细分品类是人工标注(fund-analyzer 的 /report
     // 接口本身只返回 akshare 的"基金类型"字段,值统一是"股票型-标准指数",
     // 区分不出跟踪的具体细分行业/主题,所以在这里维护一份对照表,拼进推送文案)。
@@ -139,9 +139,14 @@ data:
         // 依次拉取,总耗时取两者较慢的一个,而不是两者相加。
         const [sectorReport, fundsReport] = await Promise.all([get(sectorUrl), get(fundsUrl)]);
 
-        const fundsHeader = FUNDS.map((f) => `${f.code}: ${f.category} / ${f.sub}`).join('\n');
+        // 每一行都用"- "开头,Server 酱按 markdown 列表项渲染成独立一行;不加
+        // 前缀的纯文本行会被当成同一段落、跟前一行拼在一起显示,板块报告的最后
+        // 一行"综合建议..."和这个个股小节标题之前也要空一行,否则会被拼成一行,
+        // 视觉上分不清是板块报告的一部分还是新的小节(2026-07-26 踩过的坑)。
+        const fundsHeader = FUNDS.map((f) => `- ${f.code}: ${f.category} / ${f.sub}`).join('\n');
         const combined = [
           sectorReport,
+          '',
           '=== 个股基金监控(品类 / 细分品类) ===',
           fundsHeader,
           '',
