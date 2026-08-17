@@ -140,6 +140,14 @@ spec:
               mountPath: /home/node/.openclaw
             - name: tmp-volume
               mountPath: /tmp
+            - name: npm-cache
+              mountPath: /home/node/.npm
+          # 2026-08-17: gateway 崩溃循环(CrashLoopBackOff,持续4天+)排查到的修复——
+          # OpenClaw 启动时的 migration 会尝试装一个我们从没配置过的 "perplexity"
+          # 插件(应该是运行时通过 Control UI 之类的途径写进 PVC 上持久化状态的,
+          # 不受这份 Git 管的配置管理),npm 需要写 HOME(/home/node)下的 .npm
+          # 目录,而这里是只读根文件系统、且这个路径原来没挂任何可写卷,mkdir
+          # 直接 ENOENT,migration 失败导致整个 gateway 拒绝就绪、被反复重启。
           securityContext:
             runAsNonRoot: true
             runAsUser: 1000
@@ -157,4 +165,6 @@ spec:
           configMap:
             name: gateway-config
         - name: tmp-volume
+          emptyDir: {}
+        - name: npm-cache
           emptyDir: {}
