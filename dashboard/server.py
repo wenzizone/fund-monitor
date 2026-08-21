@@ -167,6 +167,40 @@ def _fetch_trend_tencent(etf: dict) -> list:
     return points
 
 
+# 国际现货黄金(伦敦金),美元/盎司计价,跟上面几只 A股 ETF 不是一回事——用腾讯
+# 的外盘行情接口(qt.gtimg.cn/q=hf_XAU)。试过腾讯好几个历史分时接口
+# (minute/query、kline/mkline、hf/minute...),hf_ 开头的外盘代码统统不支持,
+# 只能拿到当前这一个点,没有"当天从开盘到现在"的历史分时可拉。所以这张卡片
+# 标了 "live": True,前端不请求 /api/trend,而是每次刷新自己把当前价格点
+# 攒起来画图(见 index.html 的 liveHistory)。
+SPOTS = [
+    {"code": "XAU", "tencent": "hf_XAU", "name": "国际现货黄金(美元/盎司)", "kind": "spot"},
+]
+
+
+def _fetch_spot_tencent(spot: dict) -> dict:
+    url = f"https://qt.gtimg.cn/q={spot['tencent']}"
+    text = _fetch_text(url, encoding="gbk")
+    # 格式: 现价,涨跌幅,昨收,今开,最高,最低,时间,买价,卖价,...,日期,名称
+    raw = text.split('"', 1)[1].rsplit('"', 1)[0]
+    parts = raw.split(",")
+    price = float(parts[0])
+    change_pct = float(parts[1])
+    prev_close = float(parts[2])
+    return {
+        "code": spot["code"],
+        "name": spot["name"],
+        "price": price,
+        "prevClose": prev_close,
+        "changeAmt": price - prev_close,
+        "changePct": change_pct,
+        "source": "tencent",
+        "unit": "USD/oz",
+        "digits": 2,
+        "live": True,
+    }
+
+
 _FALLBACK_ERRORS = (OSError, ValueError, TypeError, IndexError, KeyError)
 
 
@@ -179,6 +213,15 @@ def fetch_one_quote(etf: dict) -> dict:
         return _fetch_quote_tencent(etf)
     except _FALLBACK_ERRORS as e:
         return {"code": etf["code"], "name": etf["name"], "error": str(e)}
+
+
+def fetch_one(item: dict) -> dict:
+    if item.get("kind") == "spot":
+        try:
+            return _fetch_spot_tencent(item)
+        except _FALLBACK_ERRORS as e:
+            return {"code": item["code"], "name": item["name"], "error": str(e)}
+    return fetch_one_quote(item)
 
 
 def fetch_one_trend(etf: dict) -> dict:
@@ -241,10 +284,11 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _handle_quotes(self) -> None:
-        # 6 只并发拉取,而不是挨个排队——每只自己的重试/切换预算不会因为排在
+        # 全部并发拉取,而不是挨个排队——每只自己的重试/切换预算不会因为排在
         # 后面而被前面的重试拖慢,整体延迟取决于最慢的一只而不是总和。
-        with ThreadPoolExecutor(max_workers=len(ETFS)) as pool:
-            results = list(pool.map(fetch_one_quote, ETFS))
+        items = ETFS + SPOTS
+        with ThreadPoolExecutor(max_workers=len(items)) as pool:
+            results = list(pool.map(fetch_one, items))
         self._send_json({"data": results})
 
     def _handle_trend(self, qs: dict) -> None:
