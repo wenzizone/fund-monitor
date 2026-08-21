@@ -23,8 +23,13 @@
 
 用法:
     python3 server.py
-    浏览器打开 http://localhost:8899
+    浏览器打开 http://localhost:10000
 """
+from __future__ import annotations  # 让 `dict | None` 这种写法在 Python 3.9(系统自带,
+# 通过 launchd 启动时用的是它,不是项目 .venv 里的 3.13)下也不报错——3.10 以前
+# 直接执行 `X | None` 这种类型标注会在定义函数时就抛 TypeError,加这行让标注延迟
+# 求值(变成字符串,不会真的执行),规避掉版本差异。
+
 import datetime
 import json
 import threading
@@ -35,7 +40,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 import os
 
-PORT = 8899
+PORT = 10000
 
 # 展示顺序就是这个列表书写的顺序,想调整卡片顺序/增删品种直接改这里。
 # kind 默认是 "etf"(A股场内 ETF,market: 1=上交所/0=深交所);"futures" 是走

@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  本地实时看盘小工具(dashboard/server.py)的 launchd 用户级 LaunchAgent 定义。
+
+  这份文件是"源"——实际生效的是 ~/Library/LaunchAgents/local.fund-dashboard.plist
+  软链接到这里,改这份文件后用 install-launch-agent.sh 或直接
+  `launchctl kickstart -k gui/$(id -u)/local.fund-dashboard` 重启一下就生效,
+  不需要重新做软链接。
+
+  用 /usr/bin/python3(系统自带)而不是项目 .venv 里的解释器——launchd 起进程时
+  环境是干净的,不会激活任何 venv;而且这个脚本本来就纯标准库,不需要 venv。
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>local.fund-dashboard</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/Users/hliu/Program/wenzizone/fund-monitor/dashboard/server.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/hliu/Program/wenzizone/fund-monitor/dashboard</string>
+
+    <!-- 登录/Mac重启后自动启动一次 -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- 进程意外退出(比如未捕获异常)时 launchd 自动拉起来,人为用
+         launchctl bootout 卸载的话这条不会跟你对着干 -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/hliu/Library/Logs/fund-dashboard.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/hliu/Library/Logs/fund-dashboard.err.log</string>
+</dict>
+</plist>

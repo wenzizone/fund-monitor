@@ -35,10 +35,29 @@
 ```bash
 cd dashboard
 python3 server.py
-# 浏览器打开 http://localhost:8899
+# 浏览器打开 http://localhost:10000
 ```
 
 展示每只 ETF 的最新价、涨跌幅、当日分时折线图。红涨绿跌(中国习惯,不是美股那套)。右上角显示最后更新时间、距下次刷新的倒计时,以及一个刷新间隔选择器(30秒/1分钟/5分钟/30分钟,默认30秒),选的值存在浏览器 `localStorage` 里,下次打开页面会记住。
+
+## 作为常驻服务运行(launchd)
+
+不想每次都手动 `python3 server.py`,可以注册成 Mac 用户级 LaunchAgent,登录/开机自动拉起,进程意外退出也会被 launchd 自动重启:
+
+```bash
+ln -sf "$(pwd)/dashboard/local.fund-dashboard.plist" ~/Library/LaunchAgents/local.fund-dashboard.plist
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/local.fund-dashboard.plist
+```
+
+`local.fund-dashboard.plist` 就在这个目录下,是"源文件",软链接到 `~/Library/LaunchAgents/` 只是为了让 launchd 能找到它——改完这个文件后不用重新做软链接,跑一下重启命令就生效。用的是 **系统自带的 `/usr/bin/python3`**,不是项目 `.venv` 里那个(launchd 起进程环境是干净的,不会激活任何 venv;`server.py` 本来也是纯标准库,压根不需要 venv)。日志在 `~/Library/Logs/fund-dashboard.log` / `fund-dashboard.err.log`。
+
+改完 `server.py` 想让改动生效,或者怀疑它卡住了,用重启脚本(不在这个仓库里,是单独放的,因为跟"重启后台进程"这个操作本身相关,不是项目代码):
+
+```bash
+/Users/hliu/Software/script/restart-fund-dashboard.sh
+```
+
+真正要停掉(不想让 launchd 再管它)用 `launchctl bootout gui/$(id -u)/local.fund-dashboard`,单纯 `kill` 进程只会被 launchd 立刻重新拉起来。
 
 ## 数据来源和已知的坑
 
