@@ -71,7 +71,10 @@ def _setup_logging() -> None:
 
 # 展示顺序就是这个列表书写的顺序,想调整卡片顺序/增删品种直接改这里。
 # kind 默认是 "etf"(A股场内 ETF,market: 1=上交所/0=深交所);"futures" 是走
-# 新浪期货接口的品种(目前只有沪金主连)。
+# 新浪期货接口的品种(目前只有沪金主连);"converted_gold" 是国际现货金价
+# (美元/盎司)按实时汇率折算成人民币/克的合成品种,不对应任何真实可交易的
+# 单一合约。"futures"/"converted_gold" 都会被后台线程自己攒分时线(见下面
+# _futures_background_poller 那一段)。
 #
 # 黄金相关的(ETF + 期货)放最前面。跟 fund-analyzer 监控的 6 只 OTC 联接
 # 基金(000950/001594/001344/000248/015876/018103)对应关系,逐个查证过
@@ -85,11 +88,20 @@ def _setup_logging() -> None:
 # 下面这几只不对应任何场外基金,纯粹是看盘需要加的:
 #   518880 黄金ETF(华安)      场内规模最大的黄金 ETF
 #   AUM    沪金主连(元/克)    上期所黄金期货主力连续合约,银行App里那种"人民币
-#                            实时金价"图对应的是这个,不是国际现货金价(美元/
-#                            盎司)——之前加过一版美元现货(hf_XAU),腾讯的
-#                            历史分时接口不支持这类外盘代码,只能前端攒点凑
-#                            合画图,体验明显不如有真实历史的沪金主连,已经
-#                            拿掉了。
+#                            实时金价"图对应的是这个。日盘 15:00 收盘到夜盘
+#                            21:00 开盘之间没有新成交,那几个小时后台采样线程
+#                            靠交易所自己给的成交时间戳判断"没有新成交就不重
+#                            复记点",不会拖出一大段假的平线。
+#   XAUCNY 国际金价折算(元/克) 国际现货黄金(美元/盎司,腾讯 hf_XAU)按实时
+#                            在岸人民币汇率(新浪 fx_susdcny)折算,几乎24小时
+#                            连续(只有周末休市),不像沪金主连一天要断两次。
+#                            是合成出来的参考价,不是哪个交易所真实成交的
+#                            价格——跟沪金主连实测对比过,折算值 988.49 vs
+#                            实际 987.44,只差0.1%,基本可信。涨跌幅直接用
+#                            国际金价自己算好的百分比(折算成人民币是等比例
+#                            缩放,涨跌幅不变),没有用 hf_XAU 的"昨收"字段——
+#                            那个字段实测经常直接等于现价、跟同一条记录里的
+#                            涨跌幅自相矛盾,不可信。
 #   516510 云计算ETF(易方达)  "算力"目前没有对应的场内 ETF 产品(搜过东方
 #                            财富的基金全量列表,基金名称里没有"算力"二字;
 #                            2023年有多家基金公司申报过算力/算力基础设施
@@ -106,6 +118,7 @@ INSTRUMENTS = [
         "sina_quote_symbol": "nf_AU0",
         "sina_trend_symbol": "AU0",
     },
+    {"code": "XAUCNY", "name": "国际金价折算(元/克)", "kind": "converted_gold"},
     {"code": "518880", "market": 1, "name": "黄金ETF(华安)"},
     {"code": "512070", "market": 1, "name": "非银ETF(易方达)"},
     {"code": "515290", "market": 1, "name": "银行ETF(天弘)"},
@@ -272,12 +285,66 @@ def _fetch_quote_sina_futures(item: dict) -> dict:
         "source": "sina",
         "unit": "CNY/g",
         "digits": 2,
+        "exchangeTime": parts[1],  # 交易所自己给的成交时间(HHMMSS),不是我们采样的时间
     }
 
 
-# 新浪没有能用的分时历史接口,所以自己在后台常驻攒:每隔 FUTURES_POLL_SECONDS
-# 秒采一次实时报价(上面验证过是真的在实时跳动),存进一份磁盘上的 JSON
-# 缓存文件,/api/trend 直接把这条自己攒的线还给前端。
+# ---- 数据源 4: 国际金价(腾讯外盘)+ 在岸人民币汇率(新浪)折算成元/克 ----
+# 国际现货黄金和外汇市场几乎24小时连续交易(只有周末休市),不像沪金主连
+# 那样一天要断两次,折算出来的曲线会更连续。两条腿的数据源前面都单独验证
+# 过:hf_XAU 不需要 Referer,fx_susdcny 跟新浪股票/期货接口一样需要 Referer。
+GRAMS_PER_TROY_OUNCE = 31.1034768
+
+
+def _fetch_xau_usd() -> tuple:
+    text = _fetch_text("https://qt.gtimg.cn/q=hf_XAU", encoding="gbk")
+    raw = text.split('"', 1)[1].rsplit('"', 1)[0]
+    parts = raw.split(",")
+    if not raw or len(parts) < 2:
+        raise ValueError("hf_XAU: empty quote")
+    # 格式: 现价,涨跌幅,昨收,今开,最高,最低,...
+    # 注意:实测发现"昨收"(下标2)这个字段经常直接等于现价(比如现价
+    # 4578.83、昨收也是4578.83,但同一条记录里的涨跌幅却是1.32%——两个字段
+    # 自相矛盾),这个字段对这个品种没有正确维护,不能直接拿来算涨跌。涨跌幅
+    # (下标1)倒是核对过是对的,所以直接用它,不用"现价-昨收"这套算法。
+    return float(parts[0]), float(parts[1])  # 现价, 涨跌幅(%)
+
+
+def _fetch_usdcny_rate() -> float:
+    text = _fetch_text("https://hq.sinajs.cn/list=fx_susdcny", encoding="gbk", headers=SINA_HEADERS)
+    raw = text.split('"', 1)[1].rsplit('"', 1)[0]
+    parts = raw.split(",")
+    if not raw or len(parts) < 9:
+        raise ValueError("fx_susdcny: empty quote")
+    return float(parts[8])  # 当前价,核对过在当天最高/最低区间内
+
+
+def _fetch_quote_converted_gold(item: dict) -> dict:
+    xau_price, xau_change_pct = _fetch_xau_usd()
+    usdcny = _fetch_usdcny_rate()
+    price = xau_price / GRAMS_PER_TROY_OUNCE * usdcny
+    # 折算成人民币只是把美元价乘同一个"克数+汇率"系数,等比例缩放,涨跌幅
+    # 不会因为换算单位而变——直接用国际金价自己算好的涨跌幅,不用自己拿
+    # 现价减昨收再算一遍(上面 _fetch_xau_usd 的注释里说了昨收这个字段不可信)。
+    prev_close = price / (1 + xau_change_pct / 100) if xau_change_pct != -100 else price
+    return {
+        "code": item["code"],
+        "name": item["name"],
+        "price": price,
+        "prevClose": prev_close,
+        "changeAmt": price - prev_close,
+        "changePct": xau_change_pct,
+        "source": "tencent+sina",
+        "unit": "CNY/g(折算)",
+        "digits": 2,
+    }
+
+
+# 沪金主连(futures)和国际金价折算(converted_gold)都没有能用的历史分时
+# 接口,所以自己在后台常驻攒:每隔 FUTURES_POLL_SECONDS 秒采一次实时报价
+# (上面都验证过是真的在实时跳动),存进一份磁盘上的 JSON 缓存文件,
+# /api/trend 直接把这条自己攒的线还给前端。POLLED_KINDS 之外的 kind(A股
+# 场内 ETF)走的是东财/腾讯自带的历史分时接口,不需要这套。
 #
 # 跟之前拿掉的"前端攒点"(XAU 那版)本质类似,但这次:
 # 1. 落盘而不是只存内存——重启 server.py 不会清零,当天攒的数据不会丢。
@@ -287,6 +354,7 @@ def _fetch_quote_sina_futures(item: dict) -> dict:
 #    越攒越多产生一堆按日期命名的垃圾文件。
 # 4. 刚启动服务、又是新的一天时图是空的,要等第一个采样周期(最多60秒)才
 #    有第一个点,之后跟正常开盘时间一样慢慢长满一整天。
+POLLED_KINDS = {"futures", "converted_gold"}
 FUTURES_POLL_SECONDS = 60
 FUTURES_TREND_MAX_POINTS = 600  # 60秒一个点,600点≈10小时,够盖住日盘+夜盘
 FUTURES_TREND_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".futures-trend-cache.json")
@@ -294,6 +362,7 @@ FUTURES_TREND_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__
 _futures_trend_lock = threading.Lock()
 _futures_trend_points: dict[str, list] = {}  # code -> [{"time": "HH:MM", "price": float}, ...]
 _futures_trend_date = None  # 上面这份数据是哪天攒的,跟"今天"不一样就清空重来
+_futures_last_exchange_time: dict[str, str] = {}  # code -> 上次记点时交易所给的成交时间(HHMMSS)
 
 
 def _today_str() -> str:
@@ -329,8 +398,8 @@ def _save_futures_trend_cache() -> None:
 
 def _futures_background_poller() -> None:
     global _futures_trend_date
-    futures_items = [i for i in INSTRUMENTS if i.get("kind") == "futures"]
-    if not futures_items:
+    poll_items = [i for i in INSTRUMENTS if i.get("kind") in POLLED_KINDS]
+    if not poll_items:
         return
     _load_futures_trend_cache()
     while True:
@@ -340,14 +409,34 @@ def _futures_background_poller() -> None:
                 if today != _futures_trend_date:
                     _futures_trend_points.clear()
                     _futures_trend_date = today
-            for item in futures_items:
-                try:
-                    q = _fetch_quote_sina_futures(item)
-                except _FALLBACK_ERRORS:
+            for item in poll_items:
+                code = item["code"]
+                q = fetch_one(item)  # 各数据源自己的失败已经在 fetch_one 里兜过,返回 error 字段而不是抛异常
+                if q.get("error"):
                     continue
+                if item.get("kind") == "futures":
+                    # 期货不是24小时连续交易的(比如沪金主连日盘15:00收盘,要等
+                    # 21:00才开夜盘),收盘那几个小时交易所给的成交时间戳不会动,
+                    # 但我们还是照样每60秒采一次——不去重的话图上会拖出一大段
+                    # "一模一样的点连成的平线",还白白占掉缓存容量。用交易所自己
+                    # 给的成交时间(不是我们采样的时间)判断这一轮是不是真有新
+                    # 成交,没有就跳过,不记重复点。
+                    exchange_time = q.get("exchangeTime")
+                    if exchange_time and _futures_last_exchange_time.get(code) == exchange_time:
+                        continue
+                    if exchange_time:
+                        _futures_last_exchange_time[code] = exchange_time
+                else:
+                    # 折算出来的品种(比如 converted_gold)没有单一交易所给的
+                    # 成交时间戳可用(是两条腿拼出来的),退化成"这次算出来的价
+                    # 跟上一条记录的一模一样就不重复记"的通用去重——国际金价+
+                    # 汇率几乎不休市,真出现这种情况通常也就是深夜清淡时段。
+                    prev_points = _futures_trend_points.get(code) or []
+                    if prev_points and round(prev_points[-1]["price"], 2) == round(q["price"], 2):
+                        continue
                 label = datetime.datetime.now().strftime("%H:%M")
                 with _futures_trend_lock:
-                    buf = _futures_trend_points.setdefault(item["code"], [])
+                    buf = _futures_trend_points.setdefault(code, [])
                     buf.append({"time": label, "price": q["price"]})
                     del buf[:-FUTURES_TREND_MAX_POINTS]
             _save_futures_trend_cache()
@@ -394,9 +483,15 @@ def fetch_one_trend(etf: dict) -> dict:
 
 
 def fetch_one(item: dict) -> dict:
-    if item.get("kind") == "futures":
+    kind = item.get("kind")
+    if kind == "futures":
         try:
             return _fetch_quote_sina_futures(item)
+        except _FALLBACK_ERRORS as e:
+            return {"code": item["code"], "name": item["name"], "error": str(e)}
+    if kind == "converted_gold":
+        try:
+            return _fetch_quote_converted_gold(item)
         except _FALLBACK_ERRORS as e:
             return {"code": item["code"], "name": item["name"], "error": str(e)}
     return fetch_one_quote(item)
@@ -406,7 +501,7 @@ def fetch_one_trend_for_code(code: str) -> dict:
     item = next((i for i in INSTRUMENTS if i["code"] == code), None)
     if not item:
         return {"code": code, "points": [], "error": "unknown code"}
-    if item.get("kind") == "futures":
+    if item.get("kind") in POLLED_KINDS:
         return _get_futures_trend(code)
     return fetch_one_trend(item)
 
