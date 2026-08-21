@@ -15,8 +15,8 @@
 - 沪金主连(元/克,银行App那种"人民币实时金价"图对应的品种): 新浪期货接口
   (hq.sinajs.cn)拿实时报价。新浪本身的"分时历史"接口实测很不稳定/更新
   很慢,所以分时图改成本地后台线程按固定节奏(默认60秒)采样实时报价、
-  自己在内存里攒成一条线,server.py 常驻多久就攒多久,不依赖上游有没有
-  现成的历史分时数据。
+  自己攒成一条线,落盘存在 .futures-trend-cache.json(按日期自动重置,
+  不依赖上游有没有现成的历史分时数据,重启 server.py 也不会丢当天数据)。
 
 都免费、不需要 key,也都没有稳定的浏览器端 CORS 支持,所以搞了这个小 server
 做服务端代理——浏览器只跟 localhost 打交道,没有跨域问题。
@@ -244,28 +244,69 @@ def _fetch_quote_sina_futures(item: dict) -> dict:
 
 
 # 新浪没有能用的分时历史接口,所以自己在后台常驻攒:每隔 FUTURES_POLL_SECONDS
-# 秒采一次实时报价(上面验证过是真的在实时跳动),存进内存里的时间序列,
-# /api/trend 直接把这条自己攒的线还给前端。
+# 秒采一次实时报价(上面验证过是真的在实时跳动),存进一份磁盘上的 JSON
+# 缓存文件,/api/trend 直接把这条自己攒的线还给前端。
 #
 # 跟之前拿掉的"前端攒点"(XAU 那版)本质类似,但这次:
-# 1. 在服务端攒,不会因为刷新页面/关标签页就清零,只要 server.py 不重启就
-#    一直在长——比浏览器内存里攒的更经用。
+# 1. 落盘而不是只存内存——重启 server.py 不会清零,当天攒的数据不会丢。
 # 2. 采样节奏(60秒)跟页面刷新间隔解耦——就算你把刷新间隔调到30分钟,后台
 #    还是按自己的节奏采样,图不会因此变得更稀。
-# 3. 刚启动服务时图是空的,要等第一个采样周期(最多60秒)才有第一个点,
-#    之后跟正常开盘时间一样慢慢长满一整天。
+# 3. 固定文件名 + 内容带日期戳,每天第一次采样发现日期变了就清空重来,不会
+#    越攒越多产生一堆按日期命名的垃圾文件。
+# 4. 刚启动服务、又是新的一天时图是空的,要等第一个采样周期(最多60秒)才
+#    有第一个点,之后跟正常开盘时间一样慢慢长满一整天。
 FUTURES_POLL_SECONDS = 60
 FUTURES_TREND_MAX_POINTS = 600  # 60秒一个点,600点≈10小时,够盖住日盘+夜盘
+FUTURES_TREND_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".futures-trend-cache.json")
 
 _futures_trend_lock = threading.Lock()
 _futures_trend_points: dict[str, list] = {}  # code -> [{"time": "HH:MM", "price": float}, ...]
+_futures_trend_date = None  # 上面这份数据是哪天攒的,跟"今天"不一样就清空重来
+
+
+def _today_str() -> str:
+    return datetime.date.today().isoformat()
+
+
+def _load_futures_trend_cache() -> None:
+    global _futures_trend_date
+    try:
+        with open(FUTURES_TREND_CACHE_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return  # 文件不存在/损坏,当没有缓存,从空的开始攒
+    if data.get("date") != _today_str():
+        return  # 缓存是昨天或更早的,跨天了不要,让它从空的重新攒
+    with _futures_trend_lock:
+        _futures_trend_points.update(data.get("points", {}))
+        _futures_trend_date = data["date"]
+
+
+def _save_futures_trend_cache() -> None:
+    with _futures_trend_lock:
+        payload = {"date": _futures_trend_date, "points": _futures_trend_points}
+    try:
+        # 先写临时文件再原子改名,避免万一写到一半时进程被杀导致文件损坏。
+        tmp_path = FUTURES_TREND_CACHE_FILE + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+        os.replace(tmp_path, FUTURES_TREND_CACHE_FILE)
+    except OSError:
+        pass  # 落盘失败不影响主流程,大不了这一轮没存上,内存里还有
 
 
 def _futures_background_poller() -> None:
+    global _futures_trend_date
     futures_items = [i for i in INSTRUMENTS if i.get("kind") == "futures"]
     if not futures_items:
         return
+    _load_futures_trend_cache()
     while True:
+        today = _today_str()
+        with _futures_trend_lock:
+            if today != _futures_trend_date:
+                _futures_trend_points.clear()
+                _futures_trend_date = today
         for item in futures_items:
             try:
                 q = _fetch_quote_sina_futures(item)
@@ -276,6 +317,7 @@ def _futures_background_poller() -> None:
                 buf = _futures_trend_points.setdefault(item["code"], [])
                 buf.append({"time": label, "price": q["price"]})
                 del buf[:-FUTURES_TREND_MAX_POINTS]
+        _save_futures_trend_cache()
         time.sleep(FUTURES_POLL_SECONDS)
 
 
