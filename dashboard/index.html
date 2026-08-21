@@ -64,6 +64,7 @@
   .flat { color: var(--flat); }
   svg.trend { width: 100%; height: 70px; display: block; }
   .err { color: var(--down); font-size: 12px; }
+  .tag { color: var(--muted); font-size: 11px; margin-left: 6px; font-weight: 400; }
   footer { margin-top: 20px; color: var(--muted); font-size: 12px; }
 </style>
 </head>
@@ -118,15 +119,16 @@ function trendSvg(points) {
 function cardHtml(q, trendHtml) {
   const changeClass = q.changePct > 0 ? 'up' : q.changePct < 0 ? 'down' : 'flat';
   const sign = q.changePct > 0 ? '+' : '';
+  const sourceTag = q.source === 'tencent' ? '<span class="tag">腾讯行情(东财故障切换)</span>' : '';
   if (q.error) {
     return `<div class="card" id="card-${q.code}">
       <div class="card-head"><div><div class="name">${q.name}</div><div class="code">${q.code}</div></div></div>
-      <div class="err">获取失败: ${q.error}</div>
+      <div class="err">获取失败(东财+腾讯都试过了): ${q.error}</div>
     </div>`;
   }
   return `<div class="card" id="card-${q.code}">
     <div class="card-head">
-      <div><div class="name">${q.name}</div><div class="code">${q.code}</div></div>
+      <div><div class="name">${q.name}${sourceTag}</div><div class="code">${q.code}</div></div>
     </div>
     <div class="price-row">
       <span class="price ${changeClass}">${fmt(q.price)}</span>
