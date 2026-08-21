@@ -81,8 +81,6 @@
 
 <script>
 const REFRESH_MS = 30000; // 每30秒刷新一次,可以按需改
-const LIVE_HISTORY_MAX = 200; // 现货黄金这类没有历史分时接口的,前端自己攒点画图,攒够这么多点后丢最老的
-const liveHistory = {}; // code -> [{time, price}, ...],只存在内存里,刷新页面会清空
 
 async function fetchJson(url) {
   const res = await fetch(url);
@@ -122,7 +120,6 @@ function cardHtml(q, trendHtml) {
   const changeClass = q.changePct > 0 ? 'up' : q.changePct < 0 ? 'down' : 'flat';
   const sign = q.changePct > 0 ? '+' : '';
   const sourceTag = q.source === 'tencent' ? '<span class="tag">腾讯行情(东财故障切换)</span>' : '';
-  const liveTag = q.live ? '<span class="tag">实时点位·前端累积图</span>' : '';
   const unitSuffix = q.unit ? ` <span class="tag">${q.unit}</span>` : '';
   if (q.error) {
     return `<div class="card" id="card-${q.code}">
@@ -132,7 +129,7 @@ function cardHtml(q, trendHtml) {
   }
   return `<div class="card" id="card-${q.code}">
     <div class="card-head">
-      <div><div class="name">${q.name}${sourceTag}${liveTag}</div><div class="code">${q.code}</div></div>
+      <div><div class="name">${q.name}${sourceTag}</div><div class="code">${q.code}</div></div>
     </div>
     <div class="price-row">
       <span class="price ${changeClass}">${fmt(q.price, q.digits ?? 3)}${unitSuffix}</span>
@@ -148,29 +145,18 @@ async function refresh() {
   try {
     const quotesRes = await fetchJson('/api/quotes');
     const quotes = quotesRes.data;
-    const now = new Date().toLocaleTimeString('zh-CN', { hour12: false });
-
-    // 分时图: 有历史分时接口的(ETF)去请求 /api/trend;没有的(比如现货黄金,
-    // 见 server.py 里 SPOTS 的注释)标了 live:true,前端自己把每次刷新拿到的
-    // 点攒起来画,不发额外请求。
-    const trends = await Promise.all(quotes.map(q => {
-      if (q.error || q.live) return Promise.resolve(null);
-      return fetchJson(`/api/trend?code=${q.code}`).catch(() => null);
-    }));
+    // 分时图并发拉取,互不阻塞
+    const trends = await Promise.all(
+      quotes.map(q => q.error ? Promise.resolve(null) : fetchJson(`/api/trend?code=${q.code}`).catch(() => null))
+    );
 
     gridEl.innerHTML = quotes.map((q, i) => {
-      if (q.error) return cardHtml(q, '');
-      if (q.live) {
-        const hist = liveHistory[q.code] || (liveHistory[q.code] = []);
-        hist.push({ time: now, price: q.price });
-        if (hist.length > LIVE_HISTORY_MAX) hist.shift();
-        return cardHtml(q, trendSvg(hist));
-      }
       const t = trends[i];
-      return cardHtml(q, t && t.points ? trendSvg(t.points) : '');
+      const trendHtml = t && t.points ? trendSvg(t.points) : '';
+      return cardHtml(q, trendHtml);
     }).join('');
 
-    statusEl.textContent = `最后更新: ${now}`;
+    statusEl.textContent = `最后更新: ${new Date().toLocaleTimeString('zh-CN')}`;
   } catch (e) {
     statusEl.textContent = `刷新失败: ${e.message}`;
   }

@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
-"""本地实时看盘小工具:轮询公开行情接口,展示几只 ETF 的实时价格和当日分时折线图。
+"""本地实时看盘小工具:轮询公开行情接口,展示几只 ETF/期货的实时价格和当日分时折线图。
 
 纯本地用,不部署到 K8s、不进 fund-analyzer 那套服务——这里监控的是这几只 OTC
 联接基金(见 ../assistant-k8s/fund-analyzer/analyze_fund.py 的 FUNDS)各自对应的
 交易所场内 ETF,场内 ETF 有真正的盘中实时报价和分时数据,场外联接基金本身只有
-每日一次的净值,没有"实时"这回事。
+每日一次的净值,没有"实时"这回事。另外加了几只不对应任何场外基金、纯粹是看盘
+需要的品种(黄金 ETF、沪金主连期货、云计算 ETF)。
 
-数据源:东方财富(push2/push2his)为主,腾讯(gtimg.cn/ifzq.gtimg.cn)为备——实测
-东方财富这个免费接口会成串抽风(6只同时502,不是单只随机失败),重试解决不了
-根本问题,所以东财失败时自动切到腾讯这套完全独立的行情基础设施,两边同时故障
-的概率低得多。两者都免费、不需要 key。
+数据源:
+- A股场内 ETF: 东方财富(push2/push2his)为主,腾讯(gtimg.cn/ifzq.gtimg.cn)为
+  备——实测东方财富这个免费接口会成串抽风(6只同时502,不是单只随机失败),
+  重试解决不了根本问题,所以东财失败时自动切到腾讯这套完全独立的行情基础
+  设施,两边同时故障的概率低得多。
+- 沪金主连(元/克,银行App那种"人民币实时金价"图对应的品种): 新浪期货接口
+  (hq.sinajs.cn 报价 / stock2.finance.sina.com.cn 分时),有真正的分时历史
+  (含夜盘)。
 
-这两家接口都没有稳定的浏览器端 CORS 支持,所以搞了这个小 server 做服务端
-代理——浏览器只跟 localhost 打交道,没有跨域问题。
+都免费、不需要 key,也都没有稳定的浏览器端 CORS 支持,所以搞了这个小 server
+做服务端代理——浏览器只跟 localhost 打交道,没有跨域问题。
 
 用法:
     python3 server.py
@@ -29,27 +34,51 @@ import os
 
 PORT = 8899
 
-# ETF 代码 -> (东方财富 secid 市场前缀, 显示名称)。市场前缀: 1=上交所, 0=深交所。
-# 这几个是 fund-analyzer 监控的 6 只 OTC 联接基金各自对应的目标 ETF(联接基金
-# 官方页面写明的"本基金为目标ETF的联接基金",逐个查证过全称/跟踪指数完全匹配,
-# 不是凭基金公司/主题猜的):
+# 展示顺序就是这个列表书写的顺序,想调整卡片顺序/增删品种直接改这里。
+# kind 默认是 "etf"(A股场内 ETF,market: 1=上交所/0=深交所);"futures" 是走
+# 新浪期货接口的品种(目前只有沪金主连)。
+#
+# 黄金相关的(ETF + 期货)放最前面。跟 fund-analyzer 监控的 6 只 OTC 联接
+# 基金(000950/001594/001344/000248/015876/018103)对应关系,逐个查证过
+# 全称/跟踪指数完全匹配,不是凭基金公司/主题猜的:
 #   000950 易方达沪深300非银ETF联接A       -> 512070 易方达沪深300非银行金融ETF
 #   001594 天弘中证银行指数A               -> 515290 天弘中证银行ETF
 #   001344 易方达沪深300医药ETF联接         -> 512010 易方达沪深300医药ETF
 #   000248 汇添富中证主要消费ETF联接        -> 159928 汇添富中证主要消费ETF
 #   015876 富国中证消费电子主题ETF联接A     -> 561100 富国中证消费电子主题ETF
 #   018103 易方达中证港股通消费主题ETF联接A -> 513070 易方达中证港股通消费主题ETF
-# 另外单独加了一只黄金 ETF(不对应上面 fund-analyzer 监控的任何场外基金,纯粹
-# 是看盘需要),518880 是场内规模最大的黄金 ETF,经 push2/gtimg 接口核实过
-# 名称是"黄金ETF华安"。
-ETFS = [
+# 下面这几只不对应任何场外基金,纯粹是看盘需要加的:
+#   518880 黄金ETF(华安)      场内规模最大的黄金 ETF
+#   AUM    沪金主连(元/克)    上期所黄金期货主力连续合约,银行App里那种"人民币
+#                            实时金价"图对应的是这个,不是国际现货金价(美元/
+#                            盎司)——之前加过一版美元现货(hf_XAU),腾讯的
+#                            历史分时接口不支持这类外盘代码,只能前端攒点凑
+#                            合画图,体验明显不如有真实历史的沪金主连,已经
+#                            拿掉了。
+#   516510 云计算ETF(易方达)  "算力"目前没有对应的场内 ETF 产品(搜过东方
+#                            财富的基金全量列表,基金名称里没有"算力"二字;
+#                            2023年有多家基金公司申报过算力/算力基础设施
+#                            主题ETF,但没找到已上市、名称含"算力"的产品),
+#                            云计算 ETF 是目前 A股市场里最接近"算力"主题的
+#                            真实存在的产品(数据中心、云服务器等算力基础
+#                            设施是其重仓方向),经 push2/gtimg 接口核实过
+#                            名称是"云计算ETF易方达"。
+INSTRUMENTS = [
+    {"code": "518880", "market": 1, "name": "黄金ETF(华安)"},
+    {
+        "code": "AUM",
+        "name": "沪金主连(元/克)",
+        "kind": "futures",
+        "sina_quote_symbol": "nf_AU0",
+        "sina_trend_symbol": "AU0",
+    },
     {"code": "512070", "market": 1, "name": "非银ETF(易方达)"},
     {"code": "515290", "market": 1, "name": "银行ETF(天弘)"},
     {"code": "512010", "market": 1, "name": "医药ETF(易方达)"},
     {"code": "159928", "market": 0, "name": "主要消费ETF(汇添富)"},
     {"code": "561100", "market": 1, "name": "消费电子ETF(富国)"},
     {"code": "513070", "market": 1, "name": "港股通消费ETF(易方达)"},
-    {"code": "518880", "market": 1, "name": "黄金ETF(华安)"},
+    {"code": "516510", "market": 1, "name": "云计算ETF(易方达)"},
 ]
 
 
@@ -83,7 +112,7 @@ def _fetch_json(url: str, retries: int = 3, encoding: str = "utf-8") -> dict:
     return json.loads(_fetch_text(url, retries=retries, encoding=encoding))
 
 
-# ---- 数据源 1: 东方财富(主) ----
+# ---- 数据源 1: 东方财富(A股场内ETF主源) ----
 
 def _fetch_quote_eastmoney(etf: dict) -> dict:
     secid = f"{etf['market']}.{etf['code']}"
@@ -124,7 +153,7 @@ def _fetch_trend_eastmoney(etf: dict) -> list:
     return points
 
 
-# ---- 数据源 2: 腾讯(备,东财失败时自动切换) ----
+# ---- 数据源 2: 腾讯(A股场内ETF备源,东财失败时自动切换) ----
 # gtimg.cn 跟东方财富是完全不相关的另一套行情基础设施,两边同时故障的概率
 # 远低于单边故障。经 curl 实测确认不需要 Referer(跟 Sina 的接口不一样),
 # 且响应带 Access-Control-Allow-Origin: *。
@@ -171,61 +200,13 @@ def _fetch_trend_tencent(etf: dict) -> list:
     return points
 
 
-# 国际现货黄金(伦敦金),美元/盎司计价,跟上面几只 A股 ETF 不是一回事——用腾讯
-# 的外盘行情接口(qt.gtimg.cn/q=hf_XAU)。试过腾讯好几个历史分时接口
-# (minute/query、kline/mkline、hf/minute...),hf_ 开头的外盘代码统统不支持,
-# 只能拿到当前这一个点,没有"当天从开盘到现在"的历史分时可拉。所以这张卡片
-# 标了 "live": True,前端不请求 /api/trend,而是每次刷新自己把当前价格点
-# 攒起来画图(见 index.html 的 liveHistory)。
-SPOTS = [
-    {"code": "XAU", "tencent": "hf_XAU", "name": "国际现货黄金(美元/盎司)", "kind": "spot"},
-]
-
-
-def _fetch_spot_tencent(spot: dict) -> dict:
-    url = f"https://qt.gtimg.cn/q={spot['tencent']}"
-    text = _fetch_text(url, encoding="gbk")
-    # 格式: 现价,涨跌幅,昨收,今开,最高,最低,时间,买价,卖价,...,日期,名称
-    raw = text.split('"', 1)[1].rsplit('"', 1)[0]
-    parts = raw.split(",")
-    price = float(parts[0])
-    change_pct = float(parts[1])
-    prev_close = float(parts[2])
-    return {
-        "code": spot["code"],
-        "name": spot["name"],
-        "price": price,
-        "prevClose": prev_close,
-        "changeAmt": price - prev_close,
-        "changePct": change_pct,
-        "source": "tencent",
-        "unit": "USD/oz",
-        "digits": 2,
-        "live": True,
-    }
-
-
 # ---- 数据源 3: 新浪期货(沪金主连,元/克——银行App那种"人民币金价"图) ----
-# 上面 SPOTS 里的国际现货黄金是美元计价,想要银行App里那种人民币实时金价图,
-# 对应的是上期所黄金期货主力连续合约(沪金主连/AU0),不是 A股 ETF 也不是
-# 国际现货。新浪的期货接口能给到真正的分时历史(含夜盘),不是前端攒点。
-#
 # 新浪的股票接口需要 Referer(在别处验证过),期货接口一样需要,已用 curl
 # 实测确认。东方财富的搜索接口显示这个合约其实也有 secid(113.aum),但
 # push2 接口调试期间一直 502,没法验证它的价格换算比例(f43 到底除以100
 # 还是1000,不同品种不一样),为了不引入没验证过的错误数据,先只接新浪
 # 这一个源,不做东财/新浪的自动切换(等以后新浪也不稳定了再说)。
 SINA_HEADERS = {"Referer": "https://finance.sina.com.cn"}
-
-FUTURES = [
-    {
-        "code": "AUM",
-        "name": "沪金主连(元/克)",
-        "sina_quote_symbol": "nf_AU0",
-        "sina_trend_symbol": "AU0",
-        "kind": "futures",
-    },
-]
 
 
 def _fetch_quote_sina_futures(item: dict) -> dict:
@@ -291,34 +272,6 @@ def fetch_one_quote(etf: dict) -> dict:
         return {"code": etf["code"], "name": etf["name"], "error": str(e)}
 
 
-def fetch_one(item: dict) -> dict:
-    kind = item.get("kind")
-    if kind == "spot":
-        try:
-            return _fetch_spot_tencent(item)
-        except _FALLBACK_ERRORS as e:
-            return {"code": item["code"], "name": item["name"], "error": str(e)}
-    if kind == "futures":
-        try:
-            return _fetch_quote_sina_futures(item)
-        except _FALLBACK_ERRORS as e:
-            return {"code": item["code"], "name": item["name"], "error": str(e)}
-    return fetch_one_quote(item)
-
-
-def fetch_one_trend_for_code(code: str) -> dict:
-    fut = next((f for f in FUTURES if f["code"] == code), None)
-    if fut:
-        try:
-            return {"code": code, "points": _fetch_trend_sina_futures(fut)}
-        except _FALLBACK_ERRORS as e:
-            return {"code": code, "points": [], "error": str(e)}
-    etf = next((e for e in ETFS if e["code"] == code), None)
-    if etf:
-        return fetch_one_trend(etf)
-    return {"code": code, "points": [], "error": "unknown code or no trend source"}
-
-
 def fetch_one_trend(etf: dict) -> dict:
     try:
         return {"code": etf["code"], "points": _fetch_trend_eastmoney(etf)}
@@ -328,6 +281,27 @@ def fetch_one_trend(etf: dict) -> dict:
         return {"code": etf["code"], "points": _fetch_trend_tencent(etf), "source": "tencent"}
     except _FALLBACK_ERRORS as e:
         return {"code": etf["code"], "points": [], "error": str(e)}
+
+
+def fetch_one(item: dict) -> dict:
+    if item.get("kind") == "futures":
+        try:
+            return _fetch_quote_sina_futures(item)
+        except _FALLBACK_ERRORS as e:
+            return {"code": item["code"], "name": item["name"], "error": str(e)}
+    return fetch_one_quote(item)
+
+
+def fetch_one_trend_for_code(code: str) -> dict:
+    item = next((i for i in INSTRUMENTS if i["code"] == code), None)
+    if not item:
+        return {"code": code, "points": [], "error": "unknown code"}
+    if item.get("kind") == "futures":
+        try:
+            return {"code": code, "points": _fetch_trend_sina_futures(item)}
+        except _FALLBACK_ERRORS as e:
+            return {"code": code, "points": [], "error": str(e)}
+    return fetch_one_trend(item)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -380,10 +354,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_quotes(self) -> None:
         # 全部并发拉取,而不是挨个排队——每只自己的重试/切换预算不会因为排在
-        # 后面而被前面的重试拖慢,整体延迟取决于最慢的一只而不是总和。
-        items = ETFS + SPOTS + FUTURES
-        with ThreadPoolExecutor(max_workers=len(items)) as pool:
-            results = list(pool.map(fetch_one, items))
+        # 后面而被前面的重试拖慢,整体延迟取决于最慢的一只而不是总和。展示
+        # 顺序就是 INSTRUMENTS 里写的顺序,pool.map 保证结果顺序跟输入一致。
+        with ThreadPoolExecutor(max_workers=len(INSTRUMENTS)) as pool:
+            results = list(pool.map(fetch_one, INSTRUMENTS))
         self._send_json({"data": results})
 
     def _handle_trend(self, qs: dict) -> None:
