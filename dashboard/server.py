@@ -13,8 +13,10 @@
   重试解决不了根本问题,所以东财失败时自动切到腾讯这套完全独立的行情基础
   设施,两边同时故障的概率低得多。
 - 沪金主连(元/克,银行App那种"人民币实时金价"图对应的品种): 新浪期货接口
-  (hq.sinajs.cn 报价 / stock2.finance.sina.com.cn 分时),有真正的分时历史
-  (含夜盘)。
+  (hq.sinajs.cn)拿实时报价。新浪本身的"分时历史"接口实测很不稳定/更新
+  很慢,所以分时图改成本地后台线程按固定节奏(默认60秒)采样实时报价、
+  自己在内存里攒成一条线,server.py 常驻多久就攒多久,不依赖上游有没有
+  现成的历史分时数据。
 
 都免费、不需要 key,也都没有稳定的浏览器端 CORS 支持,所以搞了这个小 server
 做服务端代理——浏览器只跟 localhost 打交道,没有跨域问题。
@@ -25,6 +27,7 @@
 """
 import datetime
 import json
+import threading
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -203,9 +206,16 @@ def _fetch_trend_tencent(etf: dict) -> list:
 # ---- 数据源 3: 新浪期货(沪金主连,元/克——银行App那种"人民币金价"图) ----
 # 新浪的股票接口需要 Referer(在别处验证过),期货接口一样需要,已用 curl
 # 实测确认。东方财富的搜索接口显示这个合约其实也有 secid(113.aum),但
-# push2 接口调试期间一直 502,没法验证它的价格换算比例(f43 到底除以100
-# 还是1000,不同品种不一样),为了不引入没验证过的错误数据,先只接新浪
-# 这一个源,不做东财/新浪的自动切换(等以后新浪也不稳定了再说)。
+# push2 接口这几天基本一直 502(不是短暂抽风,是真的长时间起不来),没法
+# 验证它的价格换算比例(f43 到底除以100还是1000,不同品种不一样),为了
+# 不引入没验证过的错误数据,先只接新浪这一个源。
+#
+# 新浪本来也有一个"分时历史"接口(stock2.finance.sina.com.cn 的
+# InnerFuturesNewService.getFewMinLine),一度用过,但实测发现它更新很慢/
+# 缓存很重:午盘收盘(11:30)到午后开盘(13:31)之间只补了一条记录,之后
+# 盯了15分钟,最后一条记录纹丝不动,而同一时间反复调实时报价接口(下面
+# 这个 _fetch_quote_sina_futures 用的那个)时间戳和价格是在正常跳动的。
+# 所以现在不用那个分时历史接口了,改成下面的做法。
 SINA_HEADERS = {"Referer": "https://finance.sina.com.cn"}
 
 
@@ -233,29 +243,48 @@ def _fetch_quote_sina_futures(item: dict) -> dict:
     }
 
 
-def _fetch_trend_sina_futures(item: dict) -> list:
-    url = (
-        "https://stock2.finance.sina.com.cn/futures/api/jsonp.php/var%20a/"
-        f"InnerFuturesNewService.getFewMinLine?symbol={item['sina_trend_symbol']}&type=1"
-    )
-    text = _fetch_text(url, headers=SINA_HEADERS)
-    start = text.find("[")
-    end = text.rfind("]")
-    if start == -1 or end == -1:
-        raise ValueError("sina: unexpected trend response")
-    rows = json.loads(text[start:end + 1])
-    if not rows:
-        raise ValueError("sina: empty trend rows")
-    # 这个接口返回的是最近好几天的连续1分钟线(含夜盘,跨日期),不是只有
-    # 今天的——找最后一次超过60分钟的间隔,只保留这次间隔之后的部分,就是
-    # "当前这个连续交易时段"(不管现在是日盘还是夜盘)。
-    times = [datetime.datetime.strptime(r["d"], "%Y-%m-%d %H:%M:%S") for r in rows]
-    cut = 0
-    for i in range(1, len(times)):
-        if (times[i] - times[i - 1]).total_seconds() > 3600:
-            cut = i
-    session_rows = rows[cut:]
-    return [{"time": r["d"][-8:-3], "price": float(r["c"])} for r in session_rows]
+# 新浪没有能用的分时历史接口,所以自己在后台常驻攒:每隔 FUTURES_POLL_SECONDS
+# 秒采一次实时报价(上面验证过是真的在实时跳动),存进内存里的时间序列,
+# /api/trend 直接把这条自己攒的线还给前端。
+#
+# 跟之前拿掉的"前端攒点"(XAU 那版)本质类似,但这次:
+# 1. 在服务端攒,不会因为刷新页面/关标签页就清零,只要 server.py 不重启就
+#    一直在长——比浏览器内存里攒的更经用。
+# 2. 采样节奏(60秒)跟页面刷新间隔解耦——就算你把刷新间隔调到30分钟,后台
+#    还是按自己的节奏采样,图不会因此变得更稀。
+# 3. 刚启动服务时图是空的,要等第一个采样周期(最多60秒)才有第一个点,
+#    之后跟正常开盘时间一样慢慢长满一整天。
+FUTURES_POLL_SECONDS = 60
+FUTURES_TREND_MAX_POINTS = 600  # 60秒一个点,600点≈10小时,够盖住日盘+夜盘
+
+_futures_trend_lock = threading.Lock()
+_futures_trend_points: dict[str, list] = {}  # code -> [{"time": "HH:MM", "price": float}, ...]
+
+
+def _futures_background_poller() -> None:
+    futures_items = [i for i in INSTRUMENTS if i.get("kind") == "futures"]
+    if not futures_items:
+        return
+    while True:
+        for item in futures_items:
+            try:
+                q = _fetch_quote_sina_futures(item)
+            except _FALLBACK_ERRORS:
+                continue
+            label = datetime.datetime.now().strftime("%H:%M")
+            with _futures_trend_lock:
+                buf = _futures_trend_points.setdefault(item["code"], [])
+                buf.append({"time": label, "price": q["price"]})
+                del buf[:-FUTURES_TREND_MAX_POINTS]
+        time.sleep(FUTURES_POLL_SECONDS)
+
+
+def _get_futures_trend(code: str) -> dict:
+    with _futures_trend_lock:
+        points = list(_futures_trend_points.get(code, []))
+    if not points:
+        return {"code": code, "points": [], "error": "后台刚启动,还没攒够采样点,最多等60秒再刷新"}
+    return {"code": code, "points": points}
 
 
 _FALLBACK_ERRORS = (OSError, ValueError, TypeError, IndexError, KeyError)
@@ -297,10 +326,7 @@ def fetch_one_trend_for_code(code: str) -> dict:
     if not item:
         return {"code": code, "points": [], "error": "unknown code"}
     if item.get("kind") == "futures":
-        try:
-            return {"code": code, "points": _fetch_trend_sina_futures(item)}
-        except _FALLBACK_ERRORS as e:
-            return {"code": code, "points": [], "error": str(e)}
+        return _get_futures_trend(code)
     return fetch_one_trend(item)
 
 
@@ -369,6 +395,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    threading.Thread(target=_futures_background_poller, daemon=True).start()
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     print(f"看盘面板: http://localhost:{PORT}  (Ctrl+C 停止)", flush=True)
     server.serve_forever()
