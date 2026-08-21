@@ -32,6 +32,8 @@ from __future__ import annotations  # 让 `dict | None` 这种写法在 Python 3
 
 import datetime
 import json
+import logging
+import logging.handlers
 import threading
 import time
 import urllib.request
@@ -41,6 +43,31 @@ from urllib.parse import urlparse, parse_qs
 import os
 
 PORT = 10000
+
+# 常驻跑的话(见 local.fund-dashboard.plist),每次 HTTP 请求都会打一行访问
+# 日志,launchd 那边的 StandardOutPath/StandardErrorPath 只是原样追加写文件、
+# 不会自动轮转,常年跑下去会越来越大。所以自己的日志(访问日志 + 后台采样
+# 线程里的异常)走这个带轮转的 logger,不依赖 launchd 或者系统 newsyslog
+# (后者要改 /etc/newsyslog.d/,需要 sudo)。单文件封顶 LOG_MAX_BYTES,滚存
+# LOG_BACKUP_COUNT 份,总占用有硬上限,不会无限长。
+LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+LOG_MAX_BYTES = 2_000_000
+LOG_BACKUP_COUNT = 3
+
+logger = logging.getLogger("dashboard")
+logger.setLevel(logging.INFO)
+
+
+def _setup_logging() -> None:
+    os.makedirs(LOG_DIR, exist_ok=True)
+    handler = logging.handlers.RotatingFileHandler(
+        os.path.join(LOG_DIR, "server.log"),
+        maxBytes=LOG_MAX_BYTES,
+        backupCount=LOG_BACKUP_COUNT,
+        encoding="utf-8",
+    )
+    handler.setFormatter(logging.Formatter("%(asctime)s %(message)s", "%Y-%m-%d %H:%M:%S"))
+    logger.addHandler(handler)
 
 # 展示顺序就是这个列表书写的顺序,想调整卡片顺序/增删品种直接改这里。
 # kind 默认是 "etf"(A股场内 ETF,market: 1=上交所/0=深交所);"futures" 是走
@@ -307,22 +334,29 @@ def _futures_background_poller() -> None:
         return
     _load_futures_trend_cache()
     while True:
-        today = _today_str()
-        with _futures_trend_lock:
-            if today != _futures_trend_date:
-                _futures_trend_points.clear()
-                _futures_trend_date = today
-        for item in futures_items:
-            try:
-                q = _fetch_quote_sina_futures(item)
-            except _FALLBACK_ERRORS:
-                continue
-            label = datetime.datetime.now().strftime("%H:%M")
+        try:
+            today = _today_str()
             with _futures_trend_lock:
-                buf = _futures_trend_points.setdefault(item["code"], [])
-                buf.append({"time": label, "price": q["price"]})
-                del buf[:-FUTURES_TREND_MAX_POINTS]
-        _save_futures_trend_cache()
+                if today != _futures_trend_date:
+                    _futures_trend_points.clear()
+                    _futures_trend_date = today
+            for item in futures_items:
+                try:
+                    q = _fetch_quote_sina_futures(item)
+                except _FALLBACK_ERRORS:
+                    continue
+                label = datetime.datetime.now().strftime("%H:%M")
+                with _futures_trend_lock:
+                    buf = _futures_trend_points.setdefault(item["code"], [])
+                    buf.append({"time": label, "price": q["price"]})
+                    del buf[:-FUTURES_TREND_MAX_POINTS]
+            _save_futures_trend_cache()
+        except Exception:  # noqa: BLE001
+            # 这个线程是常驻的,任何一轮没预料到的异常都不该让它整个死掉
+            # (死了的话分时图就永远卡在最后一次成功的采样,还没有任何提示)——
+            # 记下来,睡一轮,下一轮接着采。上面各个数据源调用已经用
+            # _FALLBACK_ERRORS 兜过一层了,这里是给意料之外的情况兜底。
+            logger.exception("futures background poller 出了意料之外的异常")
         time.sleep(FUTURES_POLL_SECONDS)
 
 
@@ -438,10 +472,22 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(fetch_one_trend_for_code(code))
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
-        print(f"{self.address_string()} - {format % args}", flush=True)
+        logger.info("%s - %s", self.address_string(), format % args)
+
+    def log_error(self, format: str, *args) -> None:  # noqa: A002
+        logger.warning("%s - %s", self.address_string(), format % args)
+
+    def handle_one_request(self) -> None:
+        try:
+            super().handle_one_request()
+        except Exception:  # noqa: BLE001
+            # 默认实现出异常时会打到 stderr(不轮转,常驻跑久了会一直攒),
+            # 改走带轮转的 logger,顺带记下具体是哪次请求出的问题。
+            logger.exception("处理请求时出了意料之外的异常: %s", self.requestline)
 
 
 if __name__ == "__main__":
+    _setup_logging()
     threading.Thread(target=_futures_background_poller, daemon=True).start()
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     print(f"看盘面板: http://localhost:{PORT}  (Ctrl+C 停止)", flush=True)

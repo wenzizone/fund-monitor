@@ -49,7 +49,11 @@ ln -sf "$(pwd)/dashboard/local.fund-dashboard.plist" ~/Library/LaunchAgents/loca
 launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/local.fund-dashboard.plist
 ```
 
-`local.fund-dashboard.plist` 就在这个目录下,是"源文件",软链接到 `~/Library/LaunchAgents/` 只是为了让 launchd 能找到它——改完这个文件后不用重新做软链接,跑一下重启命令就生效。用的是 **系统自带的 `/usr/bin/python3`**,不是项目 `.venv` 里那个(launchd 起进程环境是干净的,不会激活任何 venv;`server.py` 本来也是纯标准库,压根不需要 venv)。日志在 `~/Library/Logs/fund-dashboard.log` / `fund-dashboard.err.log`。
+`local.fund-dashboard.plist` 就在这个目录下,是"源文件",软链接到 `~/Library/LaunchAgents/` 只是为了让 launchd 能找到它——改完这个文件后不用重新做软链接,跑一下重启命令就生效。用的是 **系统自带的 `/usr/bin/python3`**,不是项目 `.venv` 里那个(launchd 起进程环境是干净的,不会激活任何 venv;`server.py` 本来也是纯标准库,压根不需要 venv)。
+
+日志分两处:
+- `~/Library/Logs/fund-dashboard.log` / `fund-dashboard.err.log`——这是 launchd 的 `StandardOutPath`/`StandardErrorPath`,只在启动横幅、以及真正没被代码兜住的致命崩溃时才会写东西,正常情况下几乎不长。**这两个文件不会自动轮转**,但常驻跑的话本身也基本不写东西,不用管。
+- `dashboard/logs/server.log`(已加进 `.gitignore`)——真正频繁写的是这个:每次 HTTP 请求的访问日志、后台采样线程里意料之外的异常,都走 Python `logging.handlers.RotatingFileHandler`,单文件封顶 2MB,滚存 3 份,总占用有硬上限(约8MB),不会无限变大。之所以自己实现轮转而不是配 macOS 的 `newsyslog`,是因为后者要改 `/etc/newsyslog.d/`,需要 sudo。
 
 改完 `server.py` 想让改动生效,或者怀疑它卡住了,用重启脚本(不在这个仓库里,是单独放的,因为跟"重启后台进程"这个操作本身相关,不是项目代码):
 
