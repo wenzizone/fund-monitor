@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+"""本地实时看盘小工具:轮询东方财富公开行情接口,展示几只 ETF 的实时价格和当日分时折线图。
+
+纯本地用,不部署到 K8s、不进 fund-analyzer 那套服务——这里监控的是这几只 OTC
+联接基金(见 ../assistant-k8s/fund-analyzer/analyze_fund.py 的 FUNDS)各自对应的
+交易所场内 ETF,场内 ETF 有真正的盘中实时报价和分时数据,场外联接基金本身只有
+每日一次的净值,没有"实时"这回事。
+
+用东方财富的 push2/push2his 公开接口(免费、不需要 key),但这两个接口没有
+CORS 响应头,浏览器直接 fetch 会被跨域拦截,所以搞了这个小 server 做服务端
+代理——浏览器只跟 localhost 打交道,没有跨域问题。
+
+用法:
+    python3 server.py
+    浏览器打开 http://localhost:8899
+"""
+import json
+import time
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
+import os
+
+PORT = 8899
+
+# ETF 代码 -> (东方财富 secid 市场前缀, 显示名称)。市场前缀: 1=上交所, 0=深交所。
+# 这几个是 fund-analyzer 监控的 6 只 OTC 联接基金各自对应的目标 ETF(联接基金
+# 官方页面写明的"本基金为目标ETF的联接基金",逐个查证过全称/跟踪指数完全匹配,
+# 不是凭基金公司/主题猜的):
+#   000950 易方达沪深300非银ETF联接A       -> 512070 易方达沪深300非银行金融ETF
+#   001594 天弘中证银行指数A               -> 515290 天弘中证银行ETF
+#   001344 易方达沪深300医药ETF联接         -> 512010 易方达沪深300医药ETF
+#   000248 汇添富中证主要消费ETF联接        -> 159928 汇添富中证主要消费ETF
+#   015876 富国中证消费电子主题ETF联接A     -> 561100 富国中证消费电子主题ETF
+#   018103 易方达中证港股通消费主题ETF联接A -> 513070 易方达中证港股通消费主题ETF
+ETFS = [
+    {"code": "512070", "market": 1, "name": "非银ETF(易方达)"},
+    {"code": "515290", "market": 1, "name": "银行ETF(天弘)"},
+    {"code": "512010", "market": 1, "name": "医药ETF(易方达)"},
+    {"code": "159928", "market": 0, "name": "主要消费ETF(汇添富)"},
+    {"code": "561100", "market": 1, "name": "消费电子ETF(富国)"},
+    {"code": "513070", "market": 1, "name": "港股通消费ETF(易方达)"},
+]
+
+
+def _fetch_json(url: str, retries: int = 5) -> dict:
+    # 东方财富这个公开接口偶发 502,而且实测是成串地抽风(连续几秒内所有请求
+    # 都失败,过一会儿又全部恢复),不是单次请求随机丢包那种——重试间隔给够
+    # (逐次拉长到2秒),总重试窗口覆盖住实测观察到的几秒级抖动。
+    last_err = None
+    delay = 0.4
+    for attempt in range(retries):
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except (OSError, ValueError) as e:
+            # OSError 覆盖 urllib.error.URLError、socket 超时,以及东方财富这个
+            # 接口抽风时常见的 http.client.RemoteDisconnected(它是 OSError 的
+            # 子类,不是 URLError 的子类,之前只抓 URLError 漏掉了这种、导致整个
+            # 请求线程被未捕获异常干掉、浏览器端直接收到空响应)。
+            last_err = e
+            if attempt < retries - 1:
+                time.sleep(delay)
+                delay = min(delay * 1.8, 2.0)
+    raise last_err
+
+
+class Handler(BaseHTTPRequestHandler):
+    def _send_json(self, payload: dict) -> None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_text(self, status: int, body: str, content_type: str = "text/plain; charset=utf-8") -> None:
+        payload = body.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def do_GET(self) -> None:
+        parsed = urlparse(self.path)
+
+        if parsed.path == "/":
+            self._serve_index()
+            return
+
+        if parsed.path == "/api/quotes":
+            self._handle_quotes()
+            return
+
+        if parsed.path == "/api/trend":
+            self._handle_trend(parse_qs(parsed.query))
+            return
+
+        self._send_text(404, "not found")
+
+    def _serve_index(self) -> None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "index.html")
+        try:
+            with open(path, "rb") as f:
+                body = f.read()
+        except FileNotFoundError:
+            self._send_text(500, "index.html not found next to server.py")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _fetch_one_quote(self, etf: dict) -> dict:
+        secid = f"{etf['market']}.{etf['code']}"
+        url = (
+            "https://push2.eastmoney.com/api/qt/stock/get"
+            f"?secid={secid}&fields=f43,f60,f169,f170,f57,f58"
+        )
+        try:
+            data = _fetch_json(url).get("data") or {}
+            return {
+                "code": etf["code"],
+                "name": etf["name"],
+                "price": data.get("f43", 0) / 1000,
+                "prevClose": data.get("f60", 0) / 1000,
+                "changeAmt": data.get("f169", 0) / 1000,
+                "changePct": data.get("f170", 0) / 100,
+            }
+        except (OSError, ValueError, TypeError) as e:
+            return {"code": etf["code"], "name": etf["name"], "error": str(e)}
+
+    def _handle_quotes(self) -> None:
+        # 6 只并发拉取,而不是挨个排队——每只自己的重试预算(见 _fetch_json)
+        # 不会因为排在后面而被前面的重试拖慢,整体延迟取决于最慢的一只而不是总和。
+        with ThreadPoolExecutor(max_workers=len(ETFS)) as pool:
+            results = list(pool.map(self._fetch_one_quote, ETFS))
+        self._send_json({"data": results})
+
+    def _handle_trend(self, qs: dict) -> None:
+        code = qs.get("code", [""])[0]
+        etf = next((e for e in ETFS if e["code"] == code), None)
+        if not etf:
+            self._send_json({"code": code, "points": [], "error": "unknown code"})
+            return
+        secid = f"{etf['market']}.{etf['code']}"
+        url = (
+            "https://push2his.eastmoney.com/api/qt/stock/trends2/get"
+            f"?secid={secid}&fields1=f1,f2,f3,f4,f5,f6,f7,f8"
+            "&fields2=f51,f52,f53,f54,f55,f56,f57,f58&iscr=0&ndays=1"
+        )
+        try:
+            data = _fetch_json(url).get("data") or {}
+            trends = data.get("trends") or []
+            points = []
+            for t in trends:
+                # 分时数据每行格式: 时间,开盘,收盘,最高,最低,成交量,成交额,均价
+                parts = t.split(",")
+                if len(parts) >= 3:
+                    points.append({"time": parts[0][-5:], "price": float(parts[2])})
+            self._send_json({"code": code, "points": points})
+        except (OSError, ValueError, TypeError) as e:
+            self._send_json({"code": code, "points": [], "error": str(e)})
+
+    def log_message(self, format: str, *args) -> None:  # noqa: A002
+        print(f"{self.address_string()} - {format % args}", flush=True)
+
+
+if __name__ == "__main__":
+    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    print(f"看盘面板: http://localhost:{PORT}  (Ctrl+C 停止)", flush=True)
+    server.serve_forever()

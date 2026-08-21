@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>ETF 实时看盘</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --card-bg: #1a1d24;
+    --border: #2a2e37;
+    --text: #e6e8eb;
+    --muted: #8b909c;
+    --up: #ef4444;      /* 中国习惯:红涨 */
+    --down: #22c55e;    /* 中国习惯:绿跌 */
+    --flat: #8b909c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 24px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  h1 { font-size: 20px; margin: 0; }
+  #status { color: var(--muted); font-size: 13px; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 16px;
+  }
+  .card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+  }
+  .card-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 8px;
+  }
+  .name { font-size: 15px; font-weight: 600; }
+  .code { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .price-row {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    margin: 6px 0 12px;
+  }
+  .price { font-size: 28px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .change { font-size: 14px; font-variant-numeric: tabular-nums; }
+  .up { color: var(--up); }
+  .down { color: var(--down); }
+  .flat { color: var(--flat); }
+  svg.trend { width: 100%; height: 70px; display: block; }
+  .err { color: var(--down); font-size: 12px; }
+  footer { margin-top: 20px; color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>ETF 实时看盘</h1>
+  <div id="status">加载中…</div>
+</header>
+<div class="grid" id="grid"></div>
+<footer>
+  数据来自东方财富公开行情接口(经本地 server.py 转发,规避浏览器跨域限制),仅供参考,不构成投资建议。
+  非交易时段展示的是最近一个交易日的收盘分时数据。
+</footer>
+
+<script>
+const REFRESH_MS = 30000; // 每30秒刷新一次,可以按需改
+
+async function fetchJson(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+function fmt(n, digits = 3) {
+  if (n === undefined || n === null || Number.isNaN(n)) return '--';
+  return n.toFixed(digits);
+}
+
+function trendSvg(points) {
+  const w = 300, h = 70, pad = 4;
+  if (!points || points.length < 2) {
+    return `<svg class="trend" viewBox="0 0 ${w} ${h}"></svg>`;
+  }
+  const prices = points.map(p => p.price);
+  const min = Math.min(...prices);
+  const max = Math.max(...prices);
+  const range = (max - min) || 1;
+  const stepX = (w - pad * 2) / (points.length - 1);
+  const coords = points.map((p, i) => {
+    const x = pad + i * stepX;
+    const y = h - pad - ((p.price - min) / range) * (h - pad * 2);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  });
+  const last = points[points.length - 1].price;
+  const first = points[0].price;
+  const color = last > first ? 'var(--up)' : last < first ? 'var(--down)' : 'var(--flat)';
+  return `<svg class="trend" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
+    <polyline points="${coords.join(' ')}" fill="none" stroke="${color}" stroke-width="1.5" vector-effect="non-scaling-stroke" />
+  </svg>`;
+}
+
+function cardHtml(q, trendHtml) {
+  const changeClass = q.changePct > 0 ? 'up' : q.changePct < 0 ? 'down' : 'flat';
+  const sign = q.changePct > 0 ? '+' : '';
+  if (q.error) {
+    return `<div class="card" id="card-${q.code}">
+      <div class="card-head"><div><div class="name">${q.name}</div><div class="code">${q.code}</div></div></div>
+      <div class="err">获取失败: ${q.error}</div>
+    </div>`;
+  }
+  return `<div class="card" id="card-${q.code}">
+    <div class="card-head">
+      <div><div class="name">${q.name}</div><div class="code">${q.code}</div></div>
+    </div>
+    <div class="price-row">
+      <span class="price ${changeClass}">${fmt(q.price)}</span>
+      <span class="change ${changeClass}">${sign}${fmt(q.changeAmt)} (${sign}${fmt(q.changePct, 2)}%)</span>
+    </div>
+    ${trendHtml}
+  </div>`;
+}
+
+async function refresh() {
+  const statusEl = document.getElementById('status');
+  const gridEl = document.getElementById('grid');
+  try {
+    const quotesRes = await fetchJson('/api/quotes');
+    const quotes = quotesRes.data;
+
+    // 分时图并发拉取,互不阻塞
+    const trends = await Promise.all(
+      quotes.map(q => q.error ? Promise.resolve(null) : fetchJson(`/api/trend?code=${q.code}`).catch(() => null))
+    );
+
+    gridEl.innerHTML = quotes.map((q, i) => {
+      const t = trends[i];
+      const trendHtml = t && t.points ? trendSvg(t.points) : '';
+      return cardHtml(q, trendHtml);
+    }).join('');
+
+    statusEl.textContent = `最后更新: ${new Date().toLocaleTimeString('zh-CN')}`;
+  } catch (e) {
+    statusEl.textContent = `刷新失败: ${e.message}`;
+  }
+}
+
+refresh();
+setInterval(refresh, REFRESH_MS);
+</script>
+</body>
+</html>

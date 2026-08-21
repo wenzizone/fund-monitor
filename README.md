@@ -8,6 +8,8 @@
 
 核心脚本是 [analyze_fund.py](analyze_fund.py),纯 Python + [akshare](https://github.com/akfamily/akshare),可以本地直接跑,也可以包成 HTTP 服务([server.py](server.py))部署到 K8s,供 [OpenClaw](https://github.com/openclaw/openclaw) 定时调用后推送微信。
 
+另外还有个 [dashboard/](dashboard/) 纯本地看盘小工具,跟上面这套 K8s 部署完全独立,监控这几只场外基金各自对应的交易所场内 ETF 实时价格和分时走势,细节见 [dashboard/README.md](dashboard/README.md)。
+
 ## 要实现的效果
 
 最终交付的效果是:**微信每天收到一条你关注的基金/板块的信号简报,每周额外收到一条结合近期财经新闻的综合解读**,不用自己每天盯盘算估值。两边分工不同,刻意分开:
