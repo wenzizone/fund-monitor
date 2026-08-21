@@ -18,6 +18,7 @@
     python3 server.py
     浏览器打开 http://localhost:8899
 """
+import datetime
 import json
 import time
 import urllib.request
@@ -52,14 +53,17 @@ ETFS = [
 ]
 
 
-def _fetch_text(url: str, retries: int = 3, encoding: str = "utf-8") -> str:
-    # 东方财富/腾讯的接口偶发抽风,而且实测是成串地失败(短时间内所有请求都
-    # 失败,过一会儿又恢复),不是单次请求随机丢包那种——重试间隔给够,但也
-    # 不宜太长,失败得快才能尽快切到备用数据源。
+def _fetch_text(url: str, retries: int = 3, encoding: str = "utf-8", headers: dict | None = None) -> str:
+    # 东方财富/腾讯/新浪的接口偶发抽风,而且实测是成串地失败(短时间内所有
+    # 请求都失败,过一会儿又恢复),不是单次请求随机丢包那种——重试间隔给够,
+    # 但也不宜太长,失败得快才能尽快切到备用数据源。
     last_err = None
     delay = 0.3
+    req_headers = {"User-Agent": "Mozilla/5.0"}
+    if headers:
+        req_headers.update(headers)
     for attempt in range(retries):
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        req = urllib.request.Request(url, headers=req_headers)
         try:
             with urllib.request.urlopen(req, timeout=8) as resp:
                 return resp.read().decode(encoding)
@@ -201,6 +205,78 @@ def _fetch_spot_tencent(spot: dict) -> dict:
     }
 
 
+# ---- 数据源 3: 新浪期货(沪金主连,元/克——银行App那种"人民币金价"图) ----
+# 上面 SPOTS 里的国际现货黄金是美元计价,想要银行App里那种人民币实时金价图,
+# 对应的是上期所黄金期货主力连续合约(沪金主连/AU0),不是 A股 ETF 也不是
+# 国际现货。新浪的期货接口能给到真正的分时历史(含夜盘),不是前端攒点。
+#
+# 新浪的股票接口需要 Referer(在别处验证过),期货接口一样需要,已用 curl
+# 实测确认。东方财富的搜索接口显示这个合约其实也有 secid(113.aum),但
+# push2 接口调试期间一直 502,没法验证它的价格换算比例(f43 到底除以100
+# 还是1000,不同品种不一样),为了不引入没验证过的错误数据,先只接新浪
+# 这一个源,不做东财/新浪的自动切换(等以后新浪也不稳定了再说)。
+SINA_HEADERS = {"Referer": "https://finance.sina.com.cn"}
+
+FUTURES = [
+    {
+        "code": "AUM",
+        "name": "沪金主连(元/克)",
+        "sina_quote_symbol": "nf_AU0",
+        "sina_trend_symbol": "AU0",
+        "kind": "futures",
+    },
+]
+
+
+def _fetch_quote_sina_futures(item: dict) -> dict:
+    url = f"https://hq.sinajs.cn/list={item['sina_quote_symbol']}"
+    text = _fetch_text(url, encoding="gbk", headers=SINA_HEADERS)
+    raw = text.split('"', 1)[1].rsplit('"', 1)[0]
+    if not raw:
+        raise ValueError("sina: empty quote")
+    parts = raw.split(",")
+    # 格式: 名称,时间,昨结算,今开盘,最高,最低,买价,卖价,最新价,...
+    # 期货涨跌幅按"昨结算价"算,不是股票那种"昨收盘价"。
+    prev_settle = float(parts[2])
+    last = float(parts[8])
+    return {
+        "code": item["code"],
+        "name": item["name"],
+        "price": last,
+        "prevClose": prev_settle,
+        "changeAmt": last - prev_settle,
+        "changePct": (last - prev_settle) / prev_settle * 100 if prev_settle else 0.0,
+        "source": "sina",
+        "unit": "CNY/g",
+        "digits": 2,
+    }
+
+
+def _fetch_trend_sina_futures(item: dict) -> list:
+    url = (
+        "https://stock2.finance.sina.com.cn/futures/api/jsonp.php/var%20a/"
+        f"InnerFuturesNewService.getFewMinLine?symbol={item['sina_trend_symbol']}&type=1"
+    )
+    text = _fetch_text(url, headers=SINA_HEADERS)
+    start = text.find("[")
+    end = text.rfind("]")
+    if start == -1 or end == -1:
+        raise ValueError("sina: unexpected trend response")
+    rows = json.loads(text[start:end + 1])
+    if not rows:
+        raise ValueError("sina: empty trend rows")
+    # 这个接口返回的是最近好几天的连续1分钟线(含夜盘,跨日期),不是只有
+    # 今天的——找最后一次超过60分钟的间隔,只保留这次间隔之后的部分,就是
+    # "当前这个连续交易时段"(不管现在是日盘还是夜盘)。
+    times = [datetime.datetime.strptime(r["d"], "%Y-%m-%d %H:%M:%S") for r in rows]
+    cut = 0
+    for i in range(1, len(times)):
+        if (times[i] - times[i - 1]).total_seconds() > 3600:
+            cut = i
+    session_rows = rows[cut:]
+    return [{"time": r["d"][-8:-3], "price": float(r["c"])} for r in session_rows]
+
+
 _FALLBACK_ERRORS = (OSError, ValueError, TypeError, IndexError, KeyError)
 
 
@@ -216,12 +292,31 @@ def fetch_one_quote(etf: dict) -> dict:
 
 
 def fetch_one(item: dict) -> dict:
-    if item.get("kind") == "spot":
+    kind = item.get("kind")
+    if kind == "spot":
         try:
             return _fetch_spot_tencent(item)
         except _FALLBACK_ERRORS as e:
             return {"code": item["code"], "name": item["name"], "error": str(e)}
+    if kind == "futures":
+        try:
+            return _fetch_quote_sina_futures(item)
+        except _FALLBACK_ERRORS as e:
+            return {"code": item["code"], "name": item["name"], "error": str(e)}
     return fetch_one_quote(item)
+
+
+def fetch_one_trend_for_code(code: str) -> dict:
+    fut = next((f for f in FUTURES if f["code"] == code), None)
+    if fut:
+        try:
+            return {"code": code, "points": _fetch_trend_sina_futures(fut)}
+        except _FALLBACK_ERRORS as e:
+            return {"code": code, "points": [], "error": str(e)}
+    etf = next((e for e in ETFS if e["code"] == code), None)
+    if etf:
+        return fetch_one_trend(etf)
+    return {"code": code, "points": [], "error": "unknown code or no trend source"}
 
 
 def fetch_one_trend(etf: dict) -> dict:
@@ -286,18 +381,14 @@ class Handler(BaseHTTPRequestHandler):
     def _handle_quotes(self) -> None:
         # 全部并发拉取,而不是挨个排队——每只自己的重试/切换预算不会因为排在
         # 后面而被前面的重试拖慢,整体延迟取决于最慢的一只而不是总和。
-        items = ETFS + SPOTS
+        items = ETFS + SPOTS + FUTURES
         with ThreadPoolExecutor(max_workers=len(items)) as pool:
             results = list(pool.map(fetch_one, items))
         self._send_json({"data": results})
 
     def _handle_trend(self, qs: dict) -> None:
         code = qs.get("code", [""])[0]
-        etf = next((e for e in ETFS if e["code"] == code), None)
-        if not etf:
-            self._send_json({"code": code, "points": [], "error": "unknown code"})
-            return
-        self._send_json(fetch_one_trend(etf))
+        self._send_json(fetch_one_trend_for_code(code))
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         print(f"{self.address_string()} - {format % args}", flush=True)
