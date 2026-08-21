@@ -64,7 +64,6 @@ PORT = 8899
 #                            设施是其重仓方向),经 push2/gtimg 接口核实过
 #                            名称是"云计算ETF易方达"。
 INSTRUMENTS = [
-    {"code": "518880", "market": 1, "name": "黄金ETF(华安)"},
     {
         "code": "AUM",
         "name": "沪金主连(元/克)",
@@ -72,6 +71,7 @@ INSTRUMENTS = [
         "sina_quote_symbol": "nf_AU0",
         "sina_trend_symbol": "AU0",
     },
+    {"code": "518880", "market": 1, "name": "黄金ETF(华安)"},
     {"code": "512070", "market": 1, "name": "非银ETF(易方达)"},
     {"code": "515290", "market": 1, "name": "银行ETF(天弘)"},
     {"code": "512010", "market": 1, "name": "医药ETF(易方达)"},

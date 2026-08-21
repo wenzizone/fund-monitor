@@ -31,7 +31,17 @@
     gap: 8px;
   }
   h1 { font-size: 20px; margin: 0; }
-  #status { color: var(--muted); font-size: 13px; }
+  .header-right { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+  #status, #countdown { color: var(--muted); font-size: 13px; }
+  #countdown { font-variant-numeric: tabular-nums; }
+  #intervalSelect {
+    background: var(--card-bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 2px 6px;
+    font-size: 13px;
+  }
   .grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
@@ -71,7 +81,16 @@
 <body>
 <header>
   <h1>ETF 实时看盘</h1>
-  <div id="status">加载中…</div>
+  <div class="header-right">
+    <div id="status">加载中…</div>
+    <div id="countdown"></div>
+    <select id="intervalSelect">
+      <option value="30000">30秒刷新</option>
+      <option value="60000">1分钟刷新</option>
+      <option value="300000">5分钟刷新</option>
+      <option value="1800000">30分钟刷新</option>
+    </select>
+  </div>
 </header>
 <div class="grid" id="grid"></div>
 <footer>
@@ -80,7 +99,12 @@
 </footer>
 
 <script>
-const REFRESH_MS = 30000; // 每30秒刷新一次,可以按需改
+const REFRESH_STORAGE_KEY = 'dashboard.refreshMs';
+const REFRESH_PRESETS = [30000, 60000, 300000, 1800000]; // 30秒/1分钟/5分钟/30分钟,跟 <select> 里的 value 对应
+let refreshMs = Number(localStorage.getItem(REFRESH_STORAGE_KEY)) || 30000;
+if (!REFRESH_PRESETS.includes(refreshMs)) refreshMs = 30000; // 防止localStorage里存了脏值
+let countdownSec = Math.round(refreshMs / 1000);
+let countdownTimer = null;
 
 async function fetchJson(url) {
   const res = await fetch(url);
@@ -139,6 +163,30 @@ function cardHtml(q, trendHtml) {
   </div>`;
 }
 
+function updateCountdownDisplay() {
+  const el = document.getElementById('countdown');
+  if (countdownSec >= 60) {
+    const m = Math.floor(countdownSec / 60), s = countdownSec % 60;
+    el.textContent = `下次刷新: ${m}分${String(s).padStart(2, '0')}秒`;
+  } else {
+    el.textContent = `下次刷新: ${countdownSec}秒`;
+  }
+}
+
+function startCountdown() {
+  clearInterval(countdownTimer);
+  countdownSec = Math.round(refreshMs / 1000);
+  updateCountdownDisplay();
+  countdownTimer = setInterval(() => {
+    countdownSec -= 1;
+    if (countdownSec <= 0) {
+      refresh();
+      countdownSec = Math.round(refreshMs / 1000);
+    }
+    updateCountdownDisplay();
+  }, 1000);
+}
+
 async function refresh() {
   const statusEl = document.getElementById('status');
   const gridEl = document.getElementById('grid');
@@ -162,8 +210,16 @@ async function refresh() {
   }
 }
 
+const intervalSelect = document.getElementById('intervalSelect');
+intervalSelect.value = String(refreshMs);
+intervalSelect.addEventListener('change', (e) => {
+  refreshMs = Number(e.target.value);
+  localStorage.setItem(REFRESH_STORAGE_KEY, String(refreshMs));
+  startCountdown(); // 立刻按新周期重新计时,不用等旧周期走完
+});
+
 refresh();
-setInterval(refresh, REFRESH_MS);
+startCountdown();
 </script>
 </body>
 </html>
